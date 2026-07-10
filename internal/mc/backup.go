@@ -152,10 +152,21 @@ func (m *Manager) doBackup(srv *Server, kind string) error {
 
 	// Freeze world saving while the copy runs, so region files are consistent.
 	if srv.proc.State() == StateRunning {
-		srv.proc.SendCommand("save-off")
-		srv.proc.SendCommand("save-all flush")
-		srv.proc.WaitForLine("Saved the game", 20*time.Second)
-		defer srv.proc.SendCommand("save-on")
+		if srv.meta.Type == TypeBedrock {
+			srv.proc.SendCommand("save hold")
+			for i := 0; i < 15; i++ {
+				srv.proc.SendCommand("save query")
+				if srv.proc.WaitForLine("Data saved", time.Second) {
+					break
+				}
+			}
+			defer srv.proc.SendCommand("save resume")
+		} else {
+			srv.proc.SendCommand("save-off")
+			srv.proc.SendCommand("save-all flush")
+			srv.proc.WaitForLine("Saved the game", 20*time.Second)
+			defer srv.proc.SendCommand("save-on")
+		}
 	}
 
 	if err := zipDir(srv.DataDir(), dest); err != nil {

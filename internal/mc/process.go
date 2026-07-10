@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ type Proc struct {
 	pid           int
 	stopRequested bool
 	exitHook      func(crashed bool, uptime time.Duration)
+	readyMarker   string
 
 	ring      []string
 	ringNext  int
@@ -119,29 +121,21 @@ func (p *Proc) Uptime() time.Duration {
 	return time.Since(p.startedAt)
 }
 
-// Start launches the java process. memMB is the -Xmx value.
-func (p *Proc) Start(javaPath string, memMB int, jarName string) error {
+// Start launches the server process. readyMarker is the console substring
+// that signals the server finished booting.
+func (p *Proc) Start(bin string, args, extraEnv []string, readyMarker string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.state != StateStopped {
 		return fmt.Errorf("server is %s", p.state)
 	}
 
-	xms := memMB
-	if xms > 512 {
-		xms = 512
-	}
-	args := []string{
-		fmt.Sprintf("-Xms%dM", xms),
-		fmt.Sprintf("-Xmx%dM", memMB),
-		"-Dfile.encoding=UTF-8",
-		// Defense in depth for pre-1.18.1 servers (Log4Shell).
-		"-Dlog4j2.formatMsgNoLookups=true",
-		"-jar", jarName,
-		"nogui",
-	}
-	cmd := exec.Command(javaPath, args...)
+	cmd := exec.Command(bin, args...)
 	cmd.Dir = p.dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	p.readyMarker = readyMarker
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -166,7 +160,7 @@ func (p *Proc) Start(javaPath string, memMB int, jarName string) error {
 	p.pid = cmd.Process.Pid
 	p.stopRequested = false
 	p.setStateLocked(StateStarting)
-	p.appendLineLocked(fmt.Sprintf("[craftpanel] Starting server (java %s)", strings.Join(args, " ")))
+	p.appendLineLocked(fmt.Sprintf("[craftpanel] Starting server (%s %s)", bin, strings.Join(args, " ")))
 
 	var readers sync.WaitGroup
 	readers.Add(2)
@@ -212,7 +206,7 @@ func (p *Proc) readLoop(r io.Reader, wg *sync.WaitGroup) {
 		buf = buf[:0]
 		p.mu.Lock()
 		p.appendLineLocked(line)
-		if p.state == StateStarting && strings.Contains(line, "]: Done (") {
+		if p.state == StateStarting && p.readyMarker != "" && strings.Contains(line, p.readyMarker) {
 			p.setStateLocked(StateRunning)
 		}
 		p.mu.Unlock()

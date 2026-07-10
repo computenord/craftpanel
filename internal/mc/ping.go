@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -77,6 +79,48 @@ func PingStatus(port int, timeout time.Duration) (*PingResult, error) {
 		return nil, err
 	}
 	return &PingResult{Online: status.Players.Online, Max: status.Players.Max}, nil
+}
+
+// PingBedrock performs a RakNet unconnected ping against a local Bedrock
+// server (UDP). The pong carries player counts in a semicolon-separated string.
+func PingBedrock(port int, timeout time.Duration) (*PingResult, error) {
+	conn, err := net.DialTimeout("udp", fmt.Sprintf("127.0.0.1:%d", port), timeout)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(timeout))
+
+	magic := []byte{0x00, 0xff, 0xff, 0x00, 0xfe, 0xfe, 0xfe, 0xfe, 0xfd, 0xfd, 0xfd, 0xfd, 0x12, 0x34, 0x56, 0x78}
+	var req bytes.Buffer
+	req.WriteByte(0x01) // unconnected ping
+	binary.Write(&req, binary.BigEndian, time.Now().UnixMilli())
+	req.Write(magic)
+	binary.Write(&req, binary.BigEndian, uint64(0x1234567890abcdef)) // client guid
+	if _, err := conn.Write(req.Bytes()); err != nil {
+		return nil, err
+	}
+
+	resp := make([]byte, 2048)
+	n, err := conn.Read(resp)
+	if err != nil {
+		return nil, err
+	}
+	// 0x1c pong: id(1) time(8) guid(8) magic(16) strlen(2) payload
+	if n < 36 || resp[0] != 0x1c {
+		return nil, errors.New("unexpected bedrock pong")
+	}
+	fields := strings.Split(string(resp[35:n]), ";")
+	// MCPE;motd;protocol;version;online;max;...
+	if len(fields) < 6 {
+		return nil, errors.New("short bedrock pong")
+	}
+	online, err1 := strconv.Atoi(fields[4])
+	max, err2 := strconv.Atoi(fields[5])
+	if err1 != nil || err2 != nil {
+		return nil, errors.New("unparsable bedrock pong")
+	}
+	return &PingResult{Online: online, Max: max}, nil
 }
 
 func writePacket(w io.Writer, payload []byte) error {

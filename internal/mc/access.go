@@ -35,11 +35,23 @@ type OpEntry struct {
 }
 
 type AccessInfo struct {
+	Bedrock     bool             `json:"bedrock"`
 	OnlineMode  bool             `json:"onlineMode"`
 	WhitelistOn bool             `json:"whitelistOn"`
 	Whitelist   []WhitelistEntry `json:"whitelist"`
 	Ops         []OpEntry        `json:"ops"`
 }
+
+// bedrockAllowEntry is one entry in Bedrock's allowlist.json. The server fills
+// in the xuid itself when the player first joins.
+type bedrockAllowEntry struct {
+	IgnoresPlayerLimit bool   `json:"ignoresPlayerLimit"`
+	Name               string `json:"name"`
+	XUID               string `json:"xuid,omitempty"`
+}
+
+// Xbox gamertags: 3-16 characters, letters, digits and single spaces.
+var gamertagRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _-]{1,18}[A-Za-z0-9]$`)
 
 /* ---------- Mojang name resolution ---------- */
 
@@ -134,11 +146,21 @@ func (m *Manager) AccessInfo(id string) (AccessInfo, error) {
 		return AccessInfo{}, err
 	}
 	info := AccessInfo{
-		OnlineMode:  m.propValue(srv, "online-mode", "true") != "false",
-		WhitelistOn: m.propValue(srv, "white-list", "false") == "true",
-		Whitelist:   []WhitelistEntry{},
-		Ops:         []OpEntry{},
+		Whitelist: []WhitelistEntry{},
+		Ops:       []OpEntry{},
 	}
+	if srv.meta.Type == TypeBedrock {
+		info.Bedrock = true
+		info.WhitelistOn = m.propValue(srv, "allow-list", "false") == "true"
+		var entries []bedrockAllowEntry
+		fsutil.ReadJSON(filepath.Join(srv.DataDir(), "allowlist.json"), &entries)
+		for _, e := range entries {
+			info.Whitelist = append(info.Whitelist, WhitelistEntry{Name: e.Name, UUID: e.XUID})
+		}
+		return info, nil
+	}
+	info.OnlineMode = m.propValue(srv, "online-mode", "true") != "false"
+	info.WhitelistOn = m.propValue(srv, "white-list", "false") == "true"
 	fsutil.ReadJSON(filepath.Join(srv.DataDir(), "whitelist.json"), &info.Whitelist)
 	fsutil.ReadJSON(filepath.Join(srv.DataDir(), "ops.json"), &info.Ops)
 	if info.Whitelist == nil {
@@ -177,6 +199,9 @@ func (m *Manager) AccessAdd(ctx context.Context, id, list, name string) error {
 	srv, err := m.get(id)
 	if err != nil {
 		return err
+	}
+	if srv.meta.Type == TypeBedrock {
+		return m.bedrockAccessAdd(srv, list, name)
 	}
 	uuid, canonical, err := m.resolvePlayer(ctx, srv, name)
 	if err != nil {
@@ -230,10 +255,74 @@ func (m *Manager) AccessAdd(ctx context.Context, id, list, name string) error {
 	return errors.New("unknown list")
 }
 
+// bedrockAccessAdd handles the allowlist of a Bedrock server. Gamertags are
+// not validated against Xbox (that would need authentication); the server
+// resolves the XUID itself when the player first joins.
+func (m *Manager) bedrockAccessAdd(srv *Server, list, name string) error {
+	if list != "whitelist" {
+		return errors.New("bedrock servers manage operators in game via /op")
+	}
+	name = strings.TrimSpace(name)
+	if !gamertagRe.MatchString(name) {
+		return ErrBadPlayerName
+	}
+	if srv.proc.State() == StateRunning {
+		if err := srv.proc.SendCommand(fmt.Sprintf("allowlist add %q", name)); err != nil {
+			return err
+		}
+		time.Sleep(700 * time.Millisecond)
+		return nil
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	path := filepath.Join(srv.DataDir(), "allowlist.json")
+	var entries []bedrockAllowEntry
+	fsutil.ReadJSON(path, &entries)
+	for _, e := range entries {
+		if strings.EqualFold(e.Name, name) {
+			return nil
+		}
+	}
+	entries = append(entries, bedrockAllowEntry{Name: name})
+	return fsutil.WriteJSONAtomic(path, entries)
+}
+
+func (m *Manager) bedrockAccessRemove(srv *Server, list, name string) error {
+	if list != "whitelist" {
+		return errors.New("bedrock servers manage operators in game via /deop")
+	}
+	name = strings.TrimSpace(name)
+	if !gamertagRe.MatchString(name) {
+		return ErrBadPlayerName
+	}
+	if srv.proc.State() == StateRunning {
+		if err := srv.proc.SendCommand(fmt.Sprintf("allowlist remove %q", name)); err != nil {
+			return err
+		}
+		time.Sleep(700 * time.Millisecond)
+		return nil
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	path := filepath.Join(srv.DataDir(), "allowlist.json")
+	var entries []bedrockAllowEntry
+	fsutil.ReadJSON(path, &entries)
+	kept := entries[:0]
+	for _, e := range entries {
+		if !strings.EqualFold(e.Name, name) {
+			kept = append(kept, e)
+		}
+	}
+	return fsutil.WriteJSONAtomic(path, kept)
+}
+
 func (m *Manager) AccessRemove(id, list, name string) error {
 	srv, err := m.get(id)
 	if err != nil {
 		return err
+	}
+	if srv.meta.Type == TypeBedrock {
+		return m.bedrockAccessRemove(srv, list, name)
 	}
 	name = strings.TrimSpace(name)
 	if !playerNameRe.MatchString(name) {
@@ -295,11 +384,20 @@ func (m *Manager) SetWhitelistEnforced(id string, on bool) error {
 	}
 	val := "false"
 	cmd := "whitelist off"
+	prop := "white-list"
+	if srv.meta.Type == TypeBedrock {
+		prop = "allow-list"
+		cmd = "allowlist off"
+	}
 	if on {
 		val = "true"
-		cmd = "whitelist on"
+		if srv.meta.Type == TypeBedrock {
+			cmd = "allowlist on"
+		} else {
+			cmd = "whitelist on"
+		}
 	}
-	if err := m.SetProperties(id, map[string]string{"white-list": val}); err != nil {
+	if err := m.SetProperties(id, map[string]string{prop: val}); err != nil {
 		return err
 	}
 	if srv.proc.State() == StateRunning {

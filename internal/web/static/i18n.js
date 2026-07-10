@@ -162,6 +162,10 @@ const STRINGS = {
     "access.placeholder": "Minecraft name",
     "access.empty": "No entries",
     "access.offlineHint": "This server runs in offline mode. Names are not checked against Mojang and get offline UUIDs.",
+    "access.allowlistTitle": "Allowlist",
+    "access.gamertag": "Xbox gamertag",
+    "access.bedrockHint": "Bedrock servers use Xbox gamertags. Names are not validated; the server fills in the XUID when the player first joins. Operators are managed in game with /op.",
+    "create.bedrockHint": "Bedrock Dedicated Server is only distributed in its latest version and needs no Java. It uses UDP; the panel reserves two consecutive ports (IPv4 and IPv6).",
 
     "panel.title": "Panel settings",
     "panel.version": "Installed version",
@@ -355,6 +359,10 @@ const STRINGS = {
     "access.placeholder": "Minecraft-Name",
     "access.empty": "Keine Einträge",
     "access.offlineHint": "Dieser Server läuft im Offline-Modus. Namen werden nicht gegen Mojang geprüft und bekommen Offline-UUIDs.",
+    "access.allowlistTitle": "Allowlist",
+    "access.gamertag": "Xbox-Gamertag",
+    "access.bedrockHint": "Bedrock-Server verwenden Xbox-Gamertags. Namen werden nicht validiert; die XUID trägt der Server beim ersten Join selbst ein. Operatoren werden im Spiel per /op verwaltet.",
+    "create.bedrockHint": "Bedrock Dedicated Server gibt es nur in der jeweils neuesten Version und braucht kein Java. Er nutzt UDP; das Panel reserviert zwei aufeinanderfolgende Ports (IPv4 und IPv6).",
 
     "panel.title": "Panel-Einstellungen",
     "panel.version": "Installierte Version",

@@ -1,16 +1,22 @@
 package mc
 
 import (
+	"archive/zip"
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"net/http"
 	"os"
+	"path"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,14 +24,19 @@ import (
 	"time"
 )
 
-// Server jar metadata is only ever fetched from these official sources.
+// Server binaries and metadata are only ever fetched from these official sources.
 const (
 	mojangManifestURL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
 	paperAPIBase      = "https://fill.papermc.io/v3/projects/paper"
+	bedrockLinksURL   = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links"
 	userAgent         = "ComputeBox-Craftpanel (+https://computebox.de)"
+	// minecraft.net's CDN drops connections from non-browser user agents on
+	// the BDS zip downloads, so those requests masquerade as a browser.
+	browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 	TypeVanilla = "vanilla"
 	TypePaper   = "paper"
+	TypeBedrock = "bedrock"
 )
 
 var metaClient = &http.Client{Timeout: 30 * time.Second}
@@ -109,6 +120,8 @@ func (v *Versions) List(ctx context.Context, typ string) ([]VersionInfo, error) 
 		list, err = listVanilla(ctx)
 	case TypePaper:
 		list, err = listPaper(ctx)
+	case TypeBedrock:
+		list, err = listBedrock(ctx)
 	default:
 		return nil, fmt.Errorf("unknown server type %q", typ)
 	}
@@ -265,6 +278,131 @@ func resolvePaper(ctx context.Context, version string) (url, sha256sum string, e
 	return dl.URL, dl.Checksums.SHA256, nil
 }
 
+/* ---------- bedrock ---------- */
+
+var bedrockVersionRe = regexp.MustCompile(`bedrock-server-([0-9][0-9.]*)\.zip`)
+
+// bedrockDownloadInfo returns the download URL and version of the current
+// Bedrock Dedicated Server for this OS. Mojang only distributes the latest
+// release, so this is always a single version.
+func bedrockDownloadInfo(ctx context.Context) (url, version string, err error) {
+	var resp struct {
+		Result struct {
+			Links []struct {
+				DownloadType string `json:"downloadType"`
+				DownloadURL  string `json:"downloadUrl"`
+			} `json:"links"`
+		} `json:"result"`
+	}
+	if err := getJSON(ctx, bedrockLinksURL, &resp); err != nil {
+		return "", "", fmt.Errorf("bedrock download links: %w", err)
+	}
+	want := "serverBedrockLinux"
+	if runtime.GOOS == "windows" {
+		want = "serverBedrockWindows"
+	}
+	for _, l := range resp.Result.Links {
+		if l.DownloadType == want {
+			m := bedrockVersionRe.FindStringSubmatch(l.DownloadURL)
+			if m == nil {
+				return l.DownloadURL, "latest", nil
+			}
+			return l.DownloadURL, m[1], nil
+		}
+	}
+	return "", "", errors.New("no bedrock server download available for this platform")
+}
+
+func listBedrock(ctx context.Context) ([]VersionInfo, error) {
+	_, version, err := bedrockDownloadInfo(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []VersionInfo{{ID: version, Latest: true}}, nil
+}
+
+// BedrockBinaryName is the server executable inside a BDS distribution.
+func BedrockBinaryName() string {
+	if runtime.GOOS == "windows" {
+		return "bedrock_server.exe"
+	}
+	return "bedrock_server"
+}
+
+// bedrockPreserve are files the server operator owns; upgrades must not
+// overwrite them once they exist.
+var bedrockPreserve = map[string]bool{
+	"server.properties": true,
+	"allowlist.json":    true,
+	"permissions.json":  true,
+}
+
+// InstallBedrock downloads the current BDS zip and unpacks it into dataDir,
+// preserving world data and operator-owned config on upgrades. Returns the
+// installed version.
+func (v *Versions) InstallBedrock(ctx context.Context, dataDir string, progress func(done, total int64)) (string, error) {
+	url, version, err := bedrockDownloadInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+	zipPath := filepath.Join(dataDir, ".bedrock-download.zip")
+	defer os.Remove(zipPath)
+	// Mojang publishes no checksums for BDS, so this is TLS-trust only.
+	if err := downloadVerified(ctx, url, zipPath, "", "", progress); err != nil {
+		return "", err
+	}
+	if err := extractBedrock(zipPath, dataDir); err != nil {
+		return "", err
+	}
+	return version, nil
+}
+
+func extractBedrock(zipPath, dataDir string) error {
+	zr, err := zip.OpenReader(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	for _, zf := range zr.File {
+		rel := path.Clean(zf.Name)
+		if rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) || strings.Contains(rel, "\\") {
+			continue
+		}
+		target := filepath.Join(dataDir, filepath.FromSlash(rel))
+		if zf.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0o750); err != nil {
+				return err
+			}
+			continue
+		}
+		if bedrockPreserve[rel] || strings.HasPrefix(rel, "worlds/") {
+			if _, err := os.Stat(target); err == nil {
+				continue
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			return err
+		}
+		in, err := zf.Open()
+		if err != nil {
+			return err
+		}
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+		if err != nil {
+			in.Close()
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			in.Close()
+			return err
+		}
+		out.Close()
+		in.Close()
+	}
+	return os.Chmod(filepath.Join(dataDir, BedrockBinaryName()), 0o755)
+}
+
 // cmpVersion compares dotted numeric versions like "1.21.4" and "26.2".
 func cmpVersion(a, b string) int {
 	as := strings.Split(a, ".")
@@ -306,7 +444,11 @@ func downloadVerified(ctx context.Context, url, destPath, algo, wantSum string, 
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", userAgent)
+	ua := userAgent
+	if strings.Contains(url, "minecraft.net/bedrockdedicatedserver") {
+		ua = browserUA
+	}
+	req.Header.Set("User-Agent", ua)
 	// No client timeout here: jar downloads can legitimately take minutes on
 	// slow links. Cancellation happens through ctx.
 	resp, err := (&http.Client{}).Do(req)
@@ -331,6 +473,8 @@ func downloadVerified(ctx context.Context, url, destPath, algo, wantSum string, 
 		h = sha1.New()
 	case "sha256":
 		h = sha256.New()
+	case "":
+		// No checksum published upstream (Bedrock); TLS is the only integrity.
 	default:
 		f.Close()
 		return fmt.Errorf("unknown checksum algorithm %q", algo)
@@ -346,7 +490,9 @@ func downloadVerified(ctx context.Context, url, destPath, algo, wantSum string, 
 				f.Close()
 				return werr
 			}
-			h.Write(buf[:n])
+			if h != nil {
+				h.Write(buf[:n])
+			}
 			done += int64(n)
 			if progress != nil {
 				progress(done, total)
@@ -363,7 +509,7 @@ func downloadVerified(ctx context.Context, url, destPath, algo, wantSum string, 
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if wantSum != "" && !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), wantSum) {
+	if h != nil && wantSum != "" && !strings.EqualFold(hex.EncodeToString(h.Sum(nil)), wantSum) {
 		return fmt.Errorf("checksum mismatch for %s", url)
 	}
 	return os.Rename(tmpPath, destPath)

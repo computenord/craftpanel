@@ -36,7 +36,7 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 ## Features
 
-**Server management.** Pick Vanilla or Paper, pick a Minecraft version from the live list, and the panel downloads the server jar straight from Mojang or PaperMC, verifying the upstream checksum before it ever touches disk. Run as many servers on one host as it can carry, each with its own port, memory limit and Java path.
+**Server management.** Pick Vanilla, Paper or Bedrock, pick a Minecraft version from the live list, and the panel downloads the server files straight from Mojang or PaperMC, verifying the upstream checksum where one is published. Run as many servers on one host as it can carry, each with its own port, memory limit and Java path. Bedrock needs no Java at all; the panel fetches the official Bedrock Dedicated Server, keeps worlds and configs across upgrades, and manages its allowlist with Xbox gamertags.
 
 **No cryptic startup failures.** The panel knows which Java version each Minecraft release requires, because it reads that from Mojang alongside the download. If your JVM is too old it tells you so, instead of letting the server die with a bare `exit status 1`.
 
@@ -109,6 +109,8 @@ sudo dnf install -y java-21-openjdk-headless
 ```
 
 You never have to look this up. The panel reads the requirement from Mojang for the exact version you picked, shows it on the server card, and refuses to start a server whose Java is too old. If you need to run different Minecraft versions side by side, install several JDKs and set a per-server Java path in the server settings.
+
+Bedrock servers need no Java. They speak UDP (default 19132), so open that port in your firewall for Bedrock instead of the TCP port Java servers use.
 
 ## Usage
 

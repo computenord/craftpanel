@@ -596,14 +596,14 @@ async function openCreateModal() {
       <label class="field"><span>${t("create.name")}</span><input type="text" name="name" maxlength="40" required></label>
       <div class="form-row">
         <label class="field"><span>${t("create.type")}</span>
-          <select name="type"><option value="paper">Paper</option><option value="vanilla">Vanilla</option></select>
+          <select name="type"><option value="paper">Paper</option><option value="vanilla">Vanilla</option><option value="bedrock">Bedrock</option></select>
         </label>
         <label class="field"><span>${t("create.version")}</span>
           <select name="version" disabled><option>${t("create.loadingVersions")}</option></select>
         </label>
       </div>
       <div class="form-row">
-        <label class="field"><span>${t("create.memory")}</span>
+        <label class="field" id="create-mem"><span>${t("create.memory")}</span>
           <select name="memoryMB">${MEM_OPTIONS.map((m) =>
             `<option value="${m}" ${m === 2048 ? "selected" : ""}>${m / 1024} GB</option>`).join("")}</select>
         </label>
@@ -611,6 +611,7 @@ async function openCreateModal() {
           <input type="number" name="port" min="1024" max="65535" placeholder="${t("create.portAuto")}">
         </label>
       </div>
+      <p class="hint" id="bedrock-hint" hidden>${t("create.bedrockHint")}</p>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="create-cancel">${t("misc.cancel")}</button>
         <button type="submit" class="btn btn-primary" id="create-submit">${t("create.submit")}</button>
@@ -635,7 +636,13 @@ async function openCreateModal() {
       toastError(e);
     }
   }
-  typeSel.addEventListener("change", loadVersions);
+  const syncTypeUI = () => {
+    const bedrock = typeSel.value === "bedrock";
+    box.querySelector("#create-mem").hidden = bedrock;
+    box.querySelector("#bedrock-hint").hidden = !bedrock;
+  };
+  typeSel.addEventListener("change", () => { syncTypeUI(); loadVersions(); });
+  syncTypeUI();
   loadVersions();
 
   box.querySelector("#create-form").addEventListener("submit", async (e) => {
@@ -712,7 +719,7 @@ function renderDetailHead(s) {
     </div>
     <div class="detail-sub">
       <span>${esc(s.type)} ${esc(s.version)}</span>
-      <span>${t("detail.address")} <code>${esc(addr)}</code>
+      <span>${t("detail.address")} <code>${esc(addr)}</code>${s.type === "bedrock" ? " (UDP)" : ""}
         <button class="btn btn-ghost btn-sm" id="copy-addr" title="${t("detail.copy")}">${ICONS.copy}</button></span>
       ${s.status === "running" ? `<span>${t("detail.uptime")} ${fmtUptime(s.uptimeS)}</span>` : ""}
       ${s.status === "running" && s.players ? `<span>${t("players.label")} ${s.players.online}/${s.players.max}</span>` : ""}
@@ -1238,13 +1245,13 @@ async function renderSettingsTab(id, s) {
       <form id="settings-form">
         <label class="field"><span>${t("settings.name")}</span>
           <input type="text" name="name" maxlength="40" value="${esc(s.name)}" required></label>
-        <div class="form-row">
+        ${s.type === "bedrock" ? "" : `<div class="form-row">
           <label class="field"><span>${t("settings.memory")}</span>
             <input type="number" name="memoryMB" min="512" max="65536" step="256" value="${s.memoryMB}"></label>
           <label class="field"><span>${t("settings.javaPath")}</span>
             <input type="text" name="javaPath" value="${esc(s.javaPath || "")}" placeholder="java"></label>
         </div>
-        <p class="hint">${t("settings.javaPathHint")}</p>
+        <p class="hint">${t("settings.javaPathHint")}</p>`}
         <label class="check"><input type="checkbox" name="autostart" ${s.autostart ? "checked" : ""}>
           <span>${t("settings.autostart")}</span></label>
         <label class="check"><input type="checkbox" name="restartOnCrash" ${s.restartOnCrash ? "checked" : ""}>
@@ -1288,15 +1295,16 @@ async function renderSettingsTab(id, s) {
     e.preventDefault();
     const f = e.target;
     try {
+      const patch = {
+        name: f.name.value.trim(),
+        autostart: f.autostart.checked,
+        restartOnCrash: f.restartOnCrash.checked
+      };
+      if (f.memoryMB) patch.memoryMB = parseInt(f.memoryMB.value, 10);
+      if (f.javaPath) patch.javaPath = f.javaPath.value.trim();
       const updated = await api("/api/servers/" + encodeURIComponent(id), {
         method: "PATCH",
-        body: {
-          name: f.name.value.trim(),
-          memoryMB: parseInt(f.memoryMB.value, 10),
-          javaPath: f.javaPath.value.trim(),
-          autostart: f.autostart.checked,
-          restartOnCrash: f.restartOnCrash.checked
-        }
+        body: patch
       });
       toast(t("settings.saved"), "ok");
       renderDetailHead(updated);
@@ -1353,22 +1361,25 @@ async function loadAccess(id) {
     if (e.status !== 401) toastError(e);
     return;
   }
-  host.innerHTML = `
-    ${info.onlineMode ? "" : `<p class="hint">${t("access.offlineHint")}</p>`}
-    <label class="check"><input type="checkbox" id="wl-mode" ${info.whitelistOn ? "checked" : ""}>
-      <span>${t("access.enforce")}</span></label>
-    <h3 class="sub">${t("access.whitelistTitle")}</h3>
-    <ul class="plist" id="wl-list"></ul>
-    <div class="add-row">
-      <input type="text" id="wl-name" placeholder="${esc(t("access.placeholder"))}" maxlength="16">
-      <button class="btn btn-sm btn-primary" id="wl-add">${t("access.add")}</button>
-    </div>
+  const opsBlock = info.bedrock ? "" : `
     <h3 class="sub">${t("access.opsTitle")}</h3>
     <ul class="plist" id="op-list"></ul>
     <div class="add-row">
       <input type="text" id="op-name" placeholder="${esc(t("access.placeholder"))}" maxlength="16">
       <button class="btn btn-sm btn-primary" id="op-add">${t("access.add")}</button>
     </div>`;
+  host.innerHTML = `
+    ${info.bedrock ? `<p class="hint">${t("access.bedrockHint")}</p>` : ""}
+    ${info.bedrock || info.onlineMode ? "" : `<p class="hint">${t("access.offlineHint")}</p>`}
+    <label class="check"><input type="checkbox" id="wl-mode" ${info.whitelistOn ? "checked" : ""}>
+      <span>${t("access.enforce")}</span></label>
+    <h3 class="sub">${info.bedrock ? t("access.allowlistTitle") : t("access.whitelistTitle")}</h3>
+    <ul class="plist" id="wl-list"></ul>
+    <div class="add-row">
+      <input type="text" id="wl-name" placeholder="${esc(info.bedrock ? t("access.gamertag") : t("access.placeholder"))}" maxlength="20">
+      <button class="btn btn-sm btn-primary" id="wl-add">${t("access.add")}</button>
+    </div>
+    ${opsBlock}`;
 
   const fillList = (ul, entries, list) => {
     ul.innerHTML = "";
@@ -1388,7 +1399,7 @@ async function loadAccess(id) {
     }
   };
   fillList(host.querySelector("#wl-list"), info.whitelist, "whitelist");
-  fillList(host.querySelector("#op-list"), info.ops, "ops");
+  if (!info.bedrock) fillList(host.querySelector("#op-list"), info.ops, "ops");
 
   host.querySelector("#wl-mode").addEventListener("change", async (e) => {
     try {
@@ -1416,7 +1427,7 @@ async function loadAccess(id) {
     });
   };
   wire("#wl-name", "#wl-add", "whitelist");
-  wire("#op-name", "#op-add", "ops");
+  if (!info.bedrock) wire("#op-name", "#op-add", "ops");
 }
 
 /* ---------- panel settings modal ---------- */
