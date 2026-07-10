@@ -1,45 +1,66 @@
+<div align="center">
+
 # ComputeBox Craftpanel
 
-A small, self-hosted web panel for creating and managing Minecraft servers on a single Linux host. Built and maintained by [ComputeBox](https://computebox.de).
+**Create and manage Minecraft servers from your browser. One binary, one command to install.**
 
-One static binary, no database, no runtime dependencies except Java for the Minecraft servers themselves. The web UI is embedded in the binary and speaks English and German.
+[![Go](https://img.shields.io/badge/Go-1.25%2B-00ADD8?logo=go&logoColor=white)](https://go.dev)
+[![Platform](https://img.shields.io/badge/platform-Linux%20amd64%20%7C%20arm64-333)](#install)
+[![No dependencies](https://img.shields.io/badge/dependencies-none-3ddc84)](#requirements)
+
+*powered by [ComputeBox](https://computebox.de)*
+
+</div>
+
+---
+
+Craftpanel is a small, self-hosted control panel for Minecraft servers. You point it at a Linux box, it gives you a web UI where you create servers, watch their console, edit their files and start or stop them.
+
+It ships as a **single static binary** with the web UI embedded. There is no database to set up, no Node, no Python, no Docker. The only thing you install alongside it is a Java runtime, because that is what Minecraft servers run on.
+
+The interface speaks **English and German** and switches at the click of a button.
+
+## Screenshots
+
+<!--
+Drop the images into docs/screenshots/ and uncomment this block. See
+docs/screenshots/HOWTO.md for the exact shots and how to take them.
+
+|  |  |
+| :--: | :--: |
+| ![Dashboard](docs/screenshots/dashboard.png) | ![Console](docs/screenshots/console.png) |
+| The dashboard, with the EULA gate | Live console with command input |
+| ![Files](docs/screenshots/files.png) | ![Login](docs/screenshots/login.png) |
+| The jailed file manager | Sign in |
+-->
 
 ## Features
 
-- Create servers in the browser: pick Vanilla or Paper, pick a Minecraft version, done. The panel downloads the server jar straight from Mojang or PaperMC and verifies the checksum.
-- Knows which Java version each Minecraft release needs and refuses to start a server on a JVM that is too old, instead of leaving you with a cryptic exit code.
-- Run several servers on one host, each with its own port, memory limit and Java path.
-- Live console with command input, streamed over SSE.
-- File manager: browse, upload, download, rename, delete and edit files, safely jailed to the server directory.
-- One click Minecraft EULA acceptance and a server.properties editor.
-- Autostart servers when the panel starts, graceful stop on shutdown.
-- Login with argon2id password hashing, rate limited sign in, strict cookies, CSRF protection and hardened systemd sandboxing.
+**Server management.** Pick Vanilla or Paper, pick a Minecraft version from the live list, and the panel downloads the server jar straight from Mojang or PaperMC, verifying the upstream checksum before it ever touches disk. Run as many servers on one host as it can carry, each with its own port, memory limit and Java path.
 
-## Install (Linux, systemd)
+**No cryptic startup failures.** The panel knows which Java version each Minecraft release requires, because it reads that from Mojang alongside the download. If your JVM is too old it tells you so, instead of letting the server die with a bare `exit status 1`.
 
-One command as root:
+**Live console.** Server output streams into the browser over server-sent events, and you can type commands straight back into it. Warnings and errors are colour coded, the last 2000 lines are kept so you see what happened before you opened the tab.
+
+**File manager.** Browse, upload, download, rename, delete and edit files in place. Every path goes through a kernel level jail, so neither `..` traversal nor a symlink can escape a server's directory.
+
+**The boring but necessary parts.** One click to accept the Minecraft EULA, a `server.properties` editor that preserves your comments and unknown keys, autostart on boot, and a graceful shutdown that lets every world save before the process exits.
+
+**Security that is actually there.** Passwords are hashed with argon2id, sign in is rate limited per IP, session tokens are random 256 bit values stored hashed on disk, every mutating request needs a custom header so cross-site requests cannot forge one, and the systemd unit runs the panel sandboxed as its own unprivileged user.
+
+## Install
+
+One command as root on any systemd Linux host:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/computenord/craftpanel/main/install/install.sh | sudo bash
 ```
 
-Then open `http://YOUR-SERVER-IP:8420` and create your admin account. That is all.
+Then open `http://YOUR-SERVER-IP:8420`. The first visit creates your admin account. That is the whole setup.
 
-Minecraft servers need Java on the host (the installer reminds you if it is missing):
+The installer downloads the binary for your architecture, creates an unprivileged `craftpanel` system user, writes a hardened systemd unit and starts the service.
 
-```bash
-sudo apt install -y openjdk-21-jre-headless
-```
-
-Which Java you need depends on the Minecraft version: 1.21.x runs on Java 21, while Minecraft 26.1 and newer requires Java 25. The panel reads the requirement from Mojang when it downloads a server and refuses to start one with too old a JVM, telling you which version it needs rather than letting the server die with a bare exit code.
-
-Upgrading: run the same install command again. Uninstall (keeps server data):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/computenord/craftpanel/main/install/install.sh | sudo bash -s -- --uninstall
-```
-
-## Schnellstart (Deutsch)
+### Schnellstart (Deutsch)
 
 Ein Befehl als root installiert das Panel als systemd-Dienst:
 
@@ -47,104 +68,112 @@ Ein Befehl als root installiert das Panel als systemd-Dienst:
 curl -fsSL https://raw.githubusercontent.com/computenord/craftpanel/main/install/install.sh | sudo bash
 ```
 
-Danach `http://DEINE-SERVER-IP:8420` im Browser öffnen und das Admin-Konto anlegen. Java wird für die Minecraft-Server benötigt (`sudo apt install -y openjdk-21-jre-headless`). Achtung: Minecraft 26.1 und neuer verlangt Java 25, ältere Versionen laufen mit Java 21. Das Panel prüft das vor dem Start und sagt dir, welche Java-Version fehlt. Für Updates einfach den Install-Befehl erneut ausführen.
+Danach `http://DEINE-SERVER-IP:8420` im Browser öffnen und das Admin-Konto anlegen. Java wird für die Minecraft-Server gebraucht, siehe unten. Für ein Update führst du denselben Befehl noch einmal aus.
 
-## Usage notes
+### Upgrading and uninstalling
 
-- Data lives in `/var/lib/craftpanel` (or `~/.craftpanel` when run manually). Each server is a folder under `servers/`, the world and all files are in its `data/` subfolder.
-- Panel port and data directory are flags: `craftpanel -addr :8420 -data /var/lib/craftpanel`.
-- Forgot the password? `echo 'newpass' | sudo -u craftpanel -- /usr/local/bin/craftpanel -data /var/lib/craftpanel reset-password youruser` (the running panel picks the new password up immediately, no restart needed)
-- Behind a reverse proxy, add `-behind-proxy` to the `ExecStart` line so the login rate limiter sees the real client IP instead of the proxy's.
-- Logs: `journalctl -u craftpanel -f`
-
-## Security
-
-- The panel serves plain HTTP. For access over the internet put it behind a reverse proxy with TLS (Caddy, nginx, Traefik) and keep the panel port firewalled. Behind a TLS proxy the session cookie is automatically marked Secure via `X-Forwarded-Proto`.
-- Sessions are random 256 bit tokens stored hashed on disk, valid for 7 days.
-- Login attempts are rate limited per IP (8 failures per 15 minutes).
-- The file manager uses kernel level path jailing (`os.Root`), so neither `..` traversal nor symlinks can escape a server's directory.
-- Minecraft servers are started directly (no shell), with `log4j2.formatMsgNoLookups=true` as defense in depth for old versions.
-
-## Building from source
-
-Requires Go 1.25+ and Node (only once, to fetch the embedded UI fonts):
+Run the install command again to upgrade. It stops the service, swaps the binary and starts it back up, backing up your unit file first.
 
 ```bash
-node scripts/fetch-fonts.mjs   # one time
-go build -o craftpanel .       # local build
-./build.sh                     # release binaries for linux/amd64, linux/arm64, windows/amd64
+# removes the service and the binary, keeps /var/lib/craftpanel
+curl -fsSL https://raw.githubusercontent.com/computenord/craftpanel/main/install/install.sh | sudo bash -s -- --uninstall
 ```
 
-Releases are plain binaries named `craftpanel-linux-amd64` and `craftpanel-linux-arm64`, attached to GitHub releases. The installer downloads exactly these names.
+## Requirements
 
-## Testing a build before publishing a release
+A Linux host on amd64 or arm64 with systemd, and a Java runtime for the Minecraft servers.
 
-The panel binary is self-contained, so you can run it straight from a shell on any Linux box:
+Which Java you need depends on the Minecraft version you run:
+
+| Minecraft version | Java required |
+| ----------------- | ------------- |
+| 1.17.x | Java 16 |
+| 1.18 up to 1.20.4 | Java 17 |
+| 1.20.5 up to 1.21.x | Java 21 |
+| 26.1 and newer | Java 25 |
 
 ```bash
-scp dist/craftpanel-linux-amd64 test-host:/tmp/craftpanel
-ssh test-host '/tmp/craftpanel -addr :8420 -data ~/craftpanel-test'
+# Debian and Ubuntu
+sudo apt install -y openjdk-21-jre-headless
+
+# RHEL, Alma, Rocky
+sudo dnf install -y java-21-openjdk-headless
 ```
 
-To exercise the installer itself (service user, systemd unit, hardening, Java detection) without a published release, serve the binary over HTTP and point `CRAFTPANEL_URL` at it:
+You never have to look this up. The panel reads the requirement from Mojang for the exact version you picked, shows it on the server card, and refuses to start a server whose Java is too old. If you need to run different Minecraft versions side by side, install several JDKs and set a per-server Java path in the server settings.
+
+## Usage
+
+### Creating a server
+
+Click **New server**, give it a name, choose Paper or Vanilla and a version. The panel downloads the jar in the background and shows a progress bar. When it is done, accept the Minecraft EULA, which the dashboard will prompt you for, and hit Start.
+
+Ports are assigned automatically starting at 25565, or you can pick your own. Remember to open that port in your firewall if players connect from outside.
+
+### Command line
+
+```
+craftpanel [flags] [command]
+
+Commands:
+  serve                       run the panel (default)
+  reset-password <username>   set a new password, read from stdin
+  version                     print the version
+
+Flags:
+  -addr string     HTTP listen address (default ":8420")
+  -data string     data directory (default "~/.craftpanel")
+  -behind-proxy    trust X-Forwarded-For from a reverse proxy for rate limiting
+```
+
+Locked out? Reset a password without touching the service. The running panel picks the change up immediately, no restart needed:
 
 ```bash
-# on your machine, inside dist/
-python3 -m http.server 8000
-
-# on the test host, with install.sh copied over
-sudo CRAFTPANEL_URL=http://YOUR-IP:8000/craftpanel-linux-amd64 bash install.sh
+echo 'newpassword' | sudo -u craftpanel -- /usr/local/bin/craftpanel \
+  -data /var/lib/craftpanel reset-password youruser
 ```
 
-Afterwards `sudo bash install.sh --uninstall` removes the service and binary again, keeping `/var/lib/craftpanel`.
-
-## Manual install (copying files by hand)
-
-The installer does nothing magic. If you would rather copy the binary over yourself, for example while the repo is still private, these are the same steps by hand.
-
-Copy `dist/craftpanel-linux-amd64` to the host with whatever you like: `scp`, WinSCP, a USB stick. Then, as root on the host:
+Watch what the panel is doing:
 
 ```bash
-# 1. verify you copied it intact (compare against dist/SHA256SUMS)
-sha256sum /tmp/craftpanel-linux-amd64
-
-# 2. put the binary in place
-install -m 755 /tmp/craftpanel-linux-amd64 /usr/local/bin/craftpanel
-
-# 3. create the service user and its data directory
-useradd --system --home-dir /var/lib/craftpanel --shell /usr/sbin/nologin craftpanel
-mkdir -p /var/lib/craftpanel
-chown -R craftpanel:craftpanel /var/lib/craftpanel
-chmod 750 /var/lib/craftpanel
-
-# 4. install the unit (copy install/craftpanel.service verbatim)
-cp craftpanel.service /etc/systemd/system/craftpanel.service
-systemctl daemon-reload
-systemctl enable --now craftpanel
-
-# 5. Java for the Minecraft servers
-apt install -y openjdk-21-jre-headless
+systemctl status craftpanel
+journalctl -u craftpanel -f
 ```
 
-On RHEL and Alma the nologin shell is `/sbin/nologin`, adjust step 3 accordingly.
+## Putting it behind TLS
 
-Check it came up with `systemctl status craftpanel` and `journalctl -u craftpanel -f`, then open `http://HOST:8420`.
+The panel speaks plain HTTP on purpose. For anything reachable from the internet, put it behind a reverse proxy that terminates TLS, and keep port 8420 closed in your firewall.
 
-To try it without systemd at all, just run the binary as your own user. It writes everything below the `-data` directory and needs no root:
+With Caddy this is the entire config:
 
-```bash
-./craftpanel-linux-amd64 -addr :8420 -data ~/craftpanel-test
+```caddy
+craftpanel.example.com {
+    reverse_proxy 127.0.0.1:8420
+}
 ```
 
-Removing a manual install: `systemctl disable --now craftpanel`, then delete `/etc/systemd/system/craftpanel.service`, `/usr/local/bin/craftpanel` and, if you want the worlds gone too, `/var/lib/craftpanel`.
+With nginx, remember that the console is a streaming endpoint:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8420;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_buffering off;        # the panel also sends X-Accel-Buffering: no
+    proxy_read_timeout 1h;
+}
+```
+
+Then add `-behind-proxy` to the `ExecStart=` line in `/etc/systemd/system/craftpanel.service`, so the login rate limiter sees the real client address instead of lumping every visitor into the proxy's IP. Behind a TLS proxy the session cookie marks itself `Secure` automatically.
 
 ## Data layout
 
-Everything the panel owns lives under the data directory:
+Everything the panel owns lives under one directory, `/var/lib/craftpanel` for a service install:
 
 ```
 /var/lib/craftpanel/
-  users.json            accounts (argon2id hashes)
+  users.json            accounts, argon2id hashes
   sessions.json         active sessions, tokens stored hashed
   servers/
     my-server/
@@ -156,14 +185,99 @@ Everything the panel owns lives under the data directory:
         world/
 ```
 
-That means backups are a plain copy of the data directory, and moving the panel to another host is copying it across. Stop the service first so no world is written mid-copy.
+A backup is therefore a plain copy of that directory, and moving to another host is an `rsync`. Stop the service first so no world is written mid copy.
 
-To adopt an existing Minecraft server, create a server in the UI with the matching version, stop it, then copy your old `world/`, `plugins/` and `server.properties` into that server's `data/` folder. Keep ownership right afterwards: `chown -R craftpanel:craftpanel /var/lib/craftpanel`.
+To adopt an existing Minecraft server, create one in the panel with a matching version, stop it, copy your old `world/`, `plugins/` and `server.properties` into that server's `data/` folder, then fix ownership with `chown -R craftpanel:craftpanel /var/lib/craftpanel`.
+
+## Security notes
+
+- Sessions are 256 bit random tokens, stored only as hashes, valid for 7 days and invalidated on password change.
+- Sign in is rate limited to 8 failures per IP per 15 minutes, and the number of concurrent password hashes is capped so a login flood cannot exhaust host memory.
+- Every state changing request must carry an `X-Craftpanel` header, which browsers will not attach cross site, and cookies are `SameSite=Strict`.
+- The file manager resolves every path inside an `os.Root` jail, enforced by the kernel rather than by string checks.
+- Minecraft servers are launched directly, never through a shell, with `log4j2.formatMsgNoLookups=true` as defence in depth for pre 1.18.1 versions.
+- The systemd unit runs with `ProtectSystem=strict`, `NoNewPrivileges`, a private `/tmp` and write access to nothing but its own data directory.
+
+Found a security problem? Please report it privately through this repository's security advisories rather than opening a public issue.
+
+## Manual install
+
+The installer does nothing you cannot do yourself. Copy `craftpanel-linux-amd64` to the host by any means you like, then as root:
+
+```bash
+# verify the copy against dist/SHA256SUMS
+sha256sum /tmp/craftpanel-linux-amd64
+
+install -m 755 /tmp/craftpanel-linux-amd64 /usr/local/bin/craftpanel
+
+useradd --system --home-dir /var/lib/craftpanel --shell /usr/sbin/nologin craftpanel
+mkdir -p /var/lib/craftpanel
+chown -R craftpanel:craftpanel /var/lib/craftpanel
+chmod 750 /var/lib/craftpanel
+
+cp install/craftpanel.service /etc/systemd/system/craftpanel.service
+systemctl daemon-reload
+systemctl enable --now craftpanel
+```
+
+On RHEL and Alma the nologin shell lives at `/sbin/nologin`, adjust accordingly.
+
+To try it without systemd or root at all, just run the binary. It writes everything below `-data` and needs no privileges:
+
+```bash
+./craftpanel-linux-amd64 -addr :8420 -data ~/craftpanel-test
+```
+
+## Building from source
+
+Requires Go 1.25 or newer, plus Node once to fetch the UI fonts that get embedded into the binary.
+
+```bash
+node scripts/fetch-fonts.mjs   # one time
+go build -o craftpanel .       # local build
+./build.sh                     # release binaries for linux/amd64, linux/arm64, windows/amd64
+```
+
+Releases are plain binaries named `craftpanel-linux-amd64` and `craftpanel-linux-arm64`. The installer looks for exactly those names.
+
+### Testing a build before you publish a release
+
+Run the binary straight from a shell on a test host, or exercise the installer itself without a published release by pointing it at any URL:
+
+```bash
+# serve the binary from your machine, inside dist/
+python3 -m http.server 8000
+
+# on the test host
+sudo CRAFTPANEL_URL=http://YOUR-IP:8000/craftpanel-linux-amd64 bash install.sh
+```
+
+The installer also honours `CRAFTPANEL_REPO`, `CRAFTPANEL_VERSION` and `CRAFTPANEL_PORT`.
+
+## Troubleshooting
+
+**The server exits immediately with `exit status 1`.** Almost always the Java version. Newer panels catch this before launching and tell you which Java you need, so upgrade the panel if you see a raw exit code.
+
+**"eula not accepted".** Accept the Minecraft EULA from the dashboard banner or the server's settings tab. Mojang requires every operator to agree to it.
+
+**Players cannot connect.** Check that the server's port is open in your firewall, and that the port shown on the server card matches `server-port` in `server.properties`.
+
+**Login says "too many failed attempts".** The rate limiter blocks an IP after 8 failures for 15 minutes. Wait, or reset the password from the command line.
+
+**Everything else.** `journalctl -u craftpanel -f` shows what the panel is doing, and the in-browser console shows what the Minecraft server is doing.
+
+## Scope
+
+Craftpanel deliberately does a few things well rather than everything badly. It manages one host, from one admin account, over a web UI. There is no multi tenancy, no user roles, no scheduled backup engine, no RCON bridge and no billing. If you need that, you want a bigger panel.
 
 ## License and trademarks
 
-Minecraft is a trademark of Mojang Synergies AB. This project is not affiliated with Mojang or Microsoft. Accepting the Minecraft EULA is a decision of each server operator.
+Minecraft is a trademark of Mojang Synergies AB. This project is not affiliated with Mojang or Microsoft, and accepting the Minecraft EULA remains the decision of each server operator.
 
 ---
 
-powered by [ComputeBox](https://computebox.de)
+<div align="center">
+
+Built and maintained by **[ComputeBox](https://computebox.de)**
+
+</div>
