@@ -1,0 +1,5 @@
+dist/
+craftpanel
+craftpanel.exe
+*.part
+.DS_Store

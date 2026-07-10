@@ -1,0 +1,34 @@
+# Reference unit file. The installer (install.sh) writes this automatically,
+# adjusted to the chosen port and repo.
+[Unit]
+Description=ComputeBox Craftpanel (Minecraft server panel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=craftpanel
+Group=craftpanel
+ExecStart=/usr/local/bin/craftpanel -data /var/lib/craftpanel -addr :8420
+Restart=on-failure
+RestartSec=3
+
+# Only signal the panel itself on stop. It shuts its Minecraft servers down
+# gracefully (world save) and exits; systemd kills leftovers after the timeout.
+KillMode=mixed
+TimeoutStopSec=90
+
+# Hardening. MemoryDenyWriteExecute stays off because the Java JIT needs it.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/craftpanel
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

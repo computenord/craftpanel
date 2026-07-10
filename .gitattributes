@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+# Shell scripts and the systemd unit are consumed on Linux and must never
+# receive CRLF line endings, or bash fails with "bad interpreter".
+*.sh text eol=lf
+*.service text eol=lf
+
+*.woff2 binary
