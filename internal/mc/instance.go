@@ -50,6 +50,9 @@ type Instance struct {
 	JavaPath  string    `json:"javaPath,omitempty"`
 	Autostart bool      `json:"autostart"`
 	CreatedAt time.Time `json:"createdAt"`
+	// JavaMajor is the Java version this Minecraft release requires, as
+	// declared by Mojang. 0 means unknown, in which case no check is enforced.
+	JavaMajor int `json:"javaMajor,omitempty"`
 }
 
 // ServerView is what the API returns: config plus runtime state.
@@ -312,6 +315,17 @@ func (m *Manager) runInstall(srv *Server) {
 		srv.mu.Unlock()
 	})
 
+	// Record the Java requirement while we are online anyway, so a later start
+	// can fail fast with a useful message instead of a JVM exit status.
+	javaMajor := 0
+	if err == nil {
+		if major, jerr := m.versions.JavaMajor(ctx, version); jerr == nil {
+			javaMajor = major
+		} else {
+			log.Printf("install %s: java requirement lookup failed: %v", srv.meta.ID, jerr)
+		}
+	}
+
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
 	srv.installing = false
@@ -322,7 +336,13 @@ func (m *Manager) runInstall(srv *Server) {
 	}
 	srv.installErr = ""
 	srv.installProgress = 1
-	log.Printf("install %s: downloaded %s %s", srv.meta.ID, typ, version)
+	if javaMajor > 0 && srv.meta.JavaMajor != javaMajor {
+		srv.meta.JavaMajor = javaMajor
+		if werr := fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta); werr != nil {
+			log.Printf("install %s: persist java requirement: %v", srv.meta.ID, werr)
+		}
+	}
+	log.Printf("install %s: downloaded %s %s (needs java %d)", srv.meta.ID, typ, version, javaMajor)
 }
 
 // Delete removes a stopped server. The directory removal happens outside both
@@ -435,7 +455,24 @@ func (s *Server) start() error {
 	if _, err := exec.LookPath(javaPath); err != nil {
 		return fmt.Errorf("java not found (%s): install a Java runtime or set a java path in the server settings", javaPath)
 	}
+	// Refuse the launch instead of letting the JVM die with a bare exit status.
+	if s.meta.JavaMajor > 0 {
+		if have, _ := DetectJava(javaPath); have > 0 && have < s.meta.JavaMajor {
+			return &JavaTooOldError{Need: s.meta.JavaMajor, Have: have}
+		}
+	}
 	return s.proc.Start(javaPath, s.meta.MemoryMB, jarName)
+}
+
+// JavaTooOldError reports that the installed JVM predates what the chosen
+// Minecraft version requires.
+type JavaTooOldError struct {
+	Need int
+	Have int
+}
+
+func (e *JavaTooOldError) Error() string {
+	return fmt.Sprintf("this server needs Java %d or newer, but the host has Java %d", e.Need, e.Have)
 }
 
 func (m *Manager) Stop(id string) error {

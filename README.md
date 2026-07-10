@@ -7,6 +7,7 @@ One static binary, no database, no runtime dependencies except Java for the Mine
 ## Features
 
 - Create servers in the browser: pick Vanilla or Paper, pick a Minecraft version, done. The panel downloads the server jar straight from Mojang or PaperMC and verifies the checksum.
+- Knows which Java version each Minecraft release needs and refuses to start a server on a JVM that is too old, instead of leaving you with a cryptic exit code.
 - Run several servers on one host, each with its own port, memory limit and Java path.
 - Live console with command input, streamed over SSE.
 - File manager: browse, upload, download, rename, delete and edit files, safely jailed to the server directory.
@@ -30,6 +31,8 @@ Minecraft servers need Java on the host (the installer reminds you if it is miss
 sudo apt install -y openjdk-21-jre-headless
 ```
 
+Which Java you need depends on the Minecraft version: 1.21.x runs on Java 21, while Minecraft 26.1 and newer requires Java 25. The panel reads the requirement from Mojang when it downloads a server and refuses to start one with too old a JVM, telling you which version it needs rather than letting the server die with a bare exit code.
+
 Upgrading: run the same install command again. Uninstall (keeps server data):
 
 ```bash
@@ -44,7 +47,7 @@ Ein Befehl als root installiert das Panel als systemd-Dienst:
 curl -fsSL https://raw.githubusercontent.com/computenord/craftpanel/main/install/install.sh | sudo bash
 ```
 
-Danach `http://DEINE-SERVER-IP:8420` im Browser öffnen und das Admin-Konto anlegen. Java wird für die Minecraft-Server benötigt (`sudo apt install -y openjdk-21-jre-headless`). Für Updates einfach den Install-Befehl erneut ausführen.
+Danach `http://DEINE-SERVER-IP:8420` im Browser öffnen und das Admin-Konto anlegen. Java wird für die Minecraft-Server benötigt (`sudo apt install -y openjdk-21-jre-headless`). Achtung: Minecraft 26.1 und neuer verlangt Java 25, ältere Versionen laufen mit Java 21. Das Panel prüft das vor dem Start und sagt dir, welche Java-Version fehlt. Für Updates einfach den Install-Befehl erneut ausführen.
 
 ## Usage notes
 

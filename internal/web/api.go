@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -112,14 +111,9 @@ func (h *Handler) javaVersion() javaInfo {
 	if time.Since(h.javaFetched) < 5*time.Minute {
 		return h.javaInfo
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "java", "-version").CombinedOutput()
 	info := javaInfo{}
-	if err == nil {
-		if line, _, ok := strings.Cut(string(out), "\n"); ok || line != "" {
-			info = javaInfo{Found: true, Version: strings.TrimSpace(line)}
-		}
+	if major, version := mc.DetectJava(""); version != "" {
+		info = javaInfo{Found: true, Version: strings.TrimSpace(version), Major: major}
 	}
 	h.javaInfo = info
 	h.javaFetched = time.Now()
@@ -191,11 +185,20 @@ func (h *Handler) deleteServer(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) startServer(w http.ResponseWriter, r *http.Request) {
 	err := h.Manager.Start(r.PathValue("id"))
 	if err != nil {
-		if strings.Contains(err.Error(), "eula") {
+		var tooOld *mc.JavaTooOldError
+		switch {
+		case errors.As(err, &tooOld):
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":   "java_too_old",
+				"message": err.Error(),
+				"need":    tooOld.Need,
+				"have":    tooOld.Have,
+			})
+		case strings.Contains(err.Error(), "eula"):
 			apiError(w, http.StatusConflict, "eula_required", err.Error())
-			return
+		default:
+			managerError(w, err)
 		}
-		managerError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})

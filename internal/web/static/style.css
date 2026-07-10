@@ -242,7 +242,14 @@ a:hover { text-decoration: underline; }
   flex-wrap: wrap;
 }
 .server-card .sc-meta span b { color: var(--text); font-weight: 600; }
-.server-card .sc-actions { margin-top: 14px; display: flex; gap: 8px; }
+.server-card .sc-actions { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; }
+.server-card .sc-badges { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+/* The EULA gate blocks every server, so it is styled as a warning panel that
+   sits above the server grid rather than as a quiet hint. */
+.eula-gate { border-color: rgba(245, 165, 36, 0.45); }
+.eula-gate h2 { color: var(--warn); }
+.eula-gate-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
 .progress {
   height: 6px;

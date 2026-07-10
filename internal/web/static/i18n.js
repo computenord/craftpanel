@@ -85,6 +85,15 @@ const STRINGS = {
     "eula.accepted": "EULA accepted",
     "eula.notAccepted": "EULA not accepted yet",
     "eula.accept": "Accept EULA",
+    "eula.banner.title": "Accept the Minecraft EULA to use your servers",
+    "eula.banner.text": "Mojang requires every server owner to accept the Minecraft End User License Agreement. Until you do, a server cannot start.",
+    "eula.acceptFor": "Accept for {name}",
+    "eula.acceptAll": "Accept for all servers",
+    "eula.required": "EULA required",
+
+    "java.tooOld": "This server needs Java {need}, but the host has Java {have}.",
+    "java.tooOldHost": "Java {have} is installed, but some servers need a newer Java. Minecraft 26.1 and newer requires Java 25.",
+    "java.needs": "Needs Java {need}",
 
     "settings.title": "Server settings",
     "settings.name": "Server name",
@@ -106,12 +115,13 @@ const STRINGS = {
     "danger.confirm": "Type the server name to confirm:",
     "danger.delete": "Delete this server",
 
-    "java.missing": "Java was not found on this host. Install it, for example on Debian or Ubuntu: sudo apt install openjdk-21-jre-headless",
+    "java.missing": "Java was not found on this host. Install a Java runtime, for example on Debian or Ubuntu: sudo apt install openjdk-21-jre-headless (Minecraft 26.1 and newer needs Java 25)",
 
     "error.invalid_credentials": "Wrong username or password",
     "error.rate_limited": "Too many failed attempts. Please wait a few minutes.",
     "error.unauthorized": "Your session has expired. Please sign in again.",
-    "error.eula_required": "Accept the Minecraft EULA in the settings tab first.",
+    "error.eula_required": "Accept the Minecraft EULA first.",
+    "error.java_too_old": "The installed Java is too old for this Minecraft version.",
     "error.not_stopped": "Stop the server first.",
     "error.upstream": "Could not reach the download servers. Check the host's internet connection.",
     "error.generic": "Something went wrong",
@@ -209,6 +219,15 @@ const STRINGS = {
     "eula.accepted": "EULA akzeptiert",
     "eula.notAccepted": "EULA noch nicht akzeptiert",
     "eula.accept": "EULA akzeptieren",
+    "eula.banner.title": "Minecraft EULA akzeptieren, um deine Server zu nutzen",
+    "eula.banner.text": "Mojang verlangt, dass jeder Serverbetreiber die Minecraft-Endnutzer-Lizenzvereinbarung akzeptiert. Solange das nicht geschehen ist, kann kein Server starten.",
+    "eula.acceptFor": "Für {name} akzeptieren",
+    "eula.acceptAll": "Für alle Server akzeptieren",
+    "eula.required": "EULA nötig",
+
+    "java.tooOld": "Dieser Server braucht Java {need}, auf dem Host läuft aber Java {have}.",
+    "java.tooOldHost": "Installiert ist Java {have}, manche Server brauchen ein neueres Java. Minecraft 26.1 und neuer verlangt Java 25.",
+    "java.needs": "Braucht Java {need}",
 
     "settings.title": "Server-Einstellungen",
     "settings.name": "Servername",
@@ -230,12 +249,13 @@ const STRINGS = {
     "danger.confirm": "Gib den Servernamen zur Bestätigung ein:",
     "danger.delete": "Diesen Server löschen",
 
-    "java.missing": "Java wurde auf diesem Host nicht gefunden. Installiere es, zum Beispiel unter Debian oder Ubuntu: sudo apt install openjdk-21-jre-headless",
+    "java.missing": "Java wurde auf diesem Host nicht gefunden. Installiere eine Java-Laufzeit, zum Beispiel unter Debian oder Ubuntu: sudo apt install openjdk-21-jre-headless (Minecraft 26.1 und neuer braucht Java 25)",
 
     "error.invalid_credentials": "Benutzername oder Passwort ist falsch",
     "error.rate_limited": "Zu viele Fehlversuche. Bitte warte ein paar Minuten.",
     "error.unauthorized": "Deine Sitzung ist abgelaufen. Bitte melde dich neu an.",
-    "error.eula_required": "Akzeptiere zuerst die Minecraft EULA im Einstellungen-Tab.",
+    "error.eula_required": "Akzeptiere zuerst die Minecraft EULA.",
+    "error.java_too_old": "Das installierte Java ist zu alt für diese Minecraft-Version.",
     "error.not_stopped": "Stoppe den Server zuerst.",
     "error.upstream": "Die Download-Server sind nicht erreichbar. Prüfe die Internetverbindung des Hosts.",
     "error.generic": "Etwas ist schiefgelaufen",

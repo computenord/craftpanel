@@ -39,8 +39,9 @@ type VersionInfo struct {
 // Versions lists available versions and resolves jar downloads. Results are
 // cached for a few minutes to keep the UI snappy and the upstream APIs happy.
 type Versions struct {
-	mu    sync.Mutex
-	cache map[string]cachedList
+	mu        sync.Mutex
+	cache     map[string]cachedList
+	javaCache map[string]int
 }
 
 type cachedList struct {
@@ -49,7 +50,48 @@ type cachedList struct {
 }
 
 func NewVersions() *Versions {
-	return &Versions{cache: map[string]cachedList{}}
+	return &Versions{cache: map[string]cachedList{}, javaCache: map[string]int{}}
+}
+
+// JavaMajor reports the Java major version Mojang declares for a Minecraft
+// release, e.g. 21 for 1.21.x and 25 for 26.1 and newer. Paper builds track the
+// same requirement, so the lookup works for both server types. It returns 0
+// when the version is unknown upstream.
+func (v *Versions) JavaMajor(ctx context.Context, version string) (int, error) {
+	v.mu.Lock()
+	if major, ok := v.javaCache[version]; ok {
+		v.mu.Unlock()
+		return major, nil
+	}
+	v.mu.Unlock()
+
+	var m mojangManifest
+	if err := getJSON(ctx, mojangManifestURL, &m); err != nil {
+		return 0, fmt.Errorf("mojang version manifest: %w", err)
+	}
+	detailURL := ""
+	for _, mv := range m.Versions {
+		if mv.ID == version {
+			detailURL = mv.URL
+			break
+		}
+	}
+	if detailURL == "" {
+		return 0, nil // not a Mojang release id, treat the requirement as unknown
+	}
+	var detail struct {
+		JavaVersion struct {
+			MajorVersion int `json:"majorVersion"`
+		} `json:"javaVersion"`
+	}
+	if err := getJSON(ctx, detailURL, &detail); err != nil {
+		return 0, fmt.Errorf("mojang version detail: %w", err)
+	}
+	major := detail.JavaVersion.MajorVersion
+	v.mu.Lock()
+	v.javaCache[version] = major
+	v.mu.Unlock()
+	return major, nil
 }
 
 func (v *Versions) List(ctx context.Context, typ string) ([]VersionInfo, error) {

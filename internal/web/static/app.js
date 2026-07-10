@@ -79,6 +79,7 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const err = new Error((data && data.message) || res.statusText);
     err.code = (data && data.error) || "generic";
+    err.data = data;
     err.status = res.status;
     if (res.status === 401 && !opts.noAuthRedirect) {
       stopPolling();
@@ -90,6 +91,10 @@ async function api(path, opts = {}) {
 }
 
 function toastError(e) {
+  if (e.code === "java_too_old" && e.data && e.data.need) {
+    toast(t("java.tooOld", { need: e.data.need, have: e.data.have }), "err");
+    return;
+  }
   const known = STRINGS.en["error." + e.code] !== undefined;
   toast(known ? t("error." + e.code) : (e.message || t("error.generic")), "err");
 }
@@ -323,17 +328,20 @@ function content() {
 
 /* ---------- dashboard ---------- */
 
+// Cards are kept across polls and patched in place. Re-creating them every
+// three seconds would restart their entrance animation.
+let dashCards = new Map();
+
 async function renderDash() {
   currentDetailId = null;
+  dashCards = new Map();
   const c = content();
   c.innerHTML = `<div class="page-head"><h1>${t("dash.title")}</h1>
     <button class="btn btn-primary" id="new-server">${ICONS.plus} ${t("dash.new")}</button></div>
+    <div id="eula-banner"></div>
     <div id="java-warning"></div>
     <div id="server-grid"></div>`;
   c.querySelector("#new-server").addEventListener("click", openCreateModal);
-  if (sys && sys.java && !sys.java.found) {
-    c.querySelector("#java-warning").innerHTML = `<div class="notice">${esc(t("java.missing"))}</div>`;
-  }
   await refreshDash();
   startPolling(refreshDash, 3000);
 }
@@ -348,59 +356,185 @@ async function refreshDash() {
     if (e.status !== 401) toastError(e);
     return;
   }
+
+  renderEulaBanner(servers);
+  renderJavaWarning(servers);
+
   if (servers.length === 0) {
-    grid.innerHTML = `<div class="empty"><h2>${t("dash.empty.title")}</h2>
-      <p>${t("dash.empty.text")}</p>
-      <button class="btn btn-primary" id="empty-new">${ICONS.plus} ${t("dash.new")}</button></div>`;
-    grid.querySelector("#empty-new").addEventListener("click", openCreateModal);
+    if (!grid.querySelector(".empty")) {
+      dashCards.clear();
+      grid.innerHTML = `<div class="empty"><h2>${t("dash.empty.title")}</h2>
+        <p>${t("dash.empty.text")}</p>
+        <button class="btn btn-primary" id="empty-new">${ICONS.plus} ${t("dash.new")}</button></div>`;
+      grid.querySelector("#empty-new").addEventListener("click", openCreateModal);
+    }
     return;
   }
-  grid.innerHTML = `<div class="grid"></div>`;
-  const wrap = grid.firstElementChild;
-  for (const s of servers) wrap.appendChild(serverCard(s));
+
+  let wrap = grid.querySelector(".grid");
+  if (!wrap) {
+    grid.innerHTML = `<div class="grid"></div>`;
+    wrap = grid.firstElementChild;
+    dashCards.clear();
+  }
+
+  const seen = new Set();
+  for (const s of servers) {
+    seen.add(s.id);
+    let card = dashCards.get(s.id);
+    if (!card) {
+      card = createServerCard(s.id);
+      dashCards.set(s.id, card);
+      wrap.appendChild(card);
+    }
+    updateServerCard(card, s);
+  }
+  for (const [id, card] of dashCards) {
+    if (!seen.has(id)) {
+      card.remove();
+      dashCards.delete(id);
+    }
+  }
+}
+
+function renderJavaWarning(servers) {
+  const host = document.getElementById("java-warning");
+  if (!host) return;
+  let html = "";
+  if (sys && sys.java && !sys.java.found) {
+    html = `<div class="notice">${esc(t("java.missing"))}</div>`;
+  } else if (sys && sys.java && sys.java.major) {
+    const need = Math.max(0, ...servers.map((s) => s.javaMajor || 0));
+    if (need > sys.java.major) {
+      html = `<div class="notice">${esc(t("java.tooOldHost", { have: sys.java.major }))}</div>`;
+    }
+  }
+  if (host.innerHTML !== html) host.innerHTML = html;
+}
+
+// The EULA gate is the one thing that blocks every server, so it gets a banner
+// at the very top of the dashboard rather than being buried in a settings tab.
+function renderEulaBanner(servers) {
+  const host = document.getElementById("eula-banner");
+  if (!host) return;
+  const pending = servers.filter((s) => !s.eula && s.status !== "installing" && s.status !== "install_failed");
+  if (pending.length === 0) {
+    if (host.childElementCount) host.innerHTML = "";
+    host.dataset.ids = "";
+    return;
+  }
+  const ids = pending.map((s) => s.id).join(",");
+  if (host.dataset.ids === ids) return; // already showing exactly these servers
+  host.dataset.ids = ids;
+
+  host.innerHTML = `<div class="panel eula-gate">
+    <h2>${t("eula.banner.title")}</h2>
+    <p class="hint">${t("eula.banner.text")}
+      <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noopener">${t("eula.link")}</a></p>
+    <div class="eula-gate-actions"></div>
+  </div>`;
+  const actions = host.querySelector(".eula-gate-actions");
+
+  if (pending.length === 1) {
+    const b = el(`<button class="btn btn-ok">${t("eula.accept")}</button>`);
+    b.addEventListener("click", () => acceptEula([pending[0].id]));
+    actions.appendChild(b);
+  } else {
+    const all = el(`<button class="btn btn-ok">${t("eula.acceptAll")}</button>`);
+    all.addEventListener("click", () => acceptEula(pending.map((s) => s.id)));
+    actions.appendChild(all);
+    for (const s of pending) {
+      const b = el(`<button class="btn btn-sm">${esc(t("eula.acceptFor", { name: s.name }))}</button>`);
+      b.addEventListener("click", () => acceptEula([s.id]));
+      actions.appendChild(b);
+    }
+  }
+}
+
+async function acceptEula(ids) {
+  try {
+    for (const id of ids) {
+      await api(`/api/servers/${encodeURIComponent(id)}/eula`, { method: "POST", body: { accept: true } });
+    }
+    toast(t("eula.accepted"), "ok");
+    const host = document.getElementById("eula-banner");
+    if (host) host.dataset.ids = "";
+    await refreshDash();
+  } catch (e) {
+    toastError(e);
+  }
 }
 
 function statusBadge(s) {
   return `<span class="badge st-${esc(s.status)}"><i class="led"></i>${t("status." + s.status)}</span>`;
 }
 
-function serverCard(s) {
+function createServerCard(id) {
   const card = el(`<div class="card server-card">
-    <div class="sc-top"><h3>${esc(s.name)}</h3>${statusBadge(s)}</div>
-    <div class="sc-meta">
-      <span>${esc(s.type)} <b>${esc(s.version)}</b></span>
-      <span>${t("misc.port")} <b>${s.port}</b></span>
-      ${s.status === "running" ? `<span>${t("detail.uptime")} <b>${fmtUptime(s.uptimeS)}</b></span>` : ""}
-    </div>
+    <div class="sc-top"><h3></h3><span class="sc-badges"></span></div>
+    <div class="sc-meta"></div>
     <div class="sc-extra"></div>
     <div class="sc-actions"></div>
   </div>`);
-  card.addEventListener("click", () => { location.hash = "#/server/" + encodeURIComponent(s.id); });
+  card.addEventListener("click", () => { location.hash = "#/server/" + encodeURIComponent(id); });
+  return card;
+}
+
+function updateServerCard(card, s) {
+  const name = card.querySelector("h3");
+  if (name.textContent !== s.name) name.textContent = s.name;
+
+  const badges = card.querySelector(".sc-badges");
+  const badgeHTML = statusBadge(s) +
+    (!s.eula && s.status !== "installing" && s.status !== "install_failed"
+      ? `<span class="badge st-install_failed"><i class="led"></i>${t("eula.required")}</span>` : "");
+  if (badges.innerHTML !== badgeHTML) badges.innerHTML = badgeHTML;
+
+  const meta = card.querySelector(".sc-meta");
+  const metaHTML = `<span>${esc(s.type)} <b>${esc(s.version)}</b></span>
+    <span>${t("misc.port")} <b>${s.port}</b></span>
+    ${s.javaMajor ? `<span>${esc(t("java.needs", { need: s.javaMajor }))}</span>` : ""}
+    ${s.status === "running" ? `<span>${t("detail.uptime")} <b>${fmtUptime(s.uptimeS)}</b></span>` : ""}`;
+  if (meta.innerHTML !== metaHTML) meta.innerHTML = metaHTML;
 
   const extra = card.querySelector(".sc-extra");
   if (s.status === "installing") {
-    extra.innerHTML = `<div class="progress"><i></i></div>`;
-    extra.querySelector("i").style.width = Math.round(s.progress * 100) + "%";
+    let bar = extra.querySelector(".progress i");
+    if (!bar) {
+      extra.innerHTML = `<div class="progress"><i></i></div>`;
+      bar = extra.querySelector("i");
+    }
+    bar.style.width = Math.round(s.progress * 100) + "%";
   } else if (s.status === "install_failed") {
-    extra.innerHTML = `<p class="hint">${esc(s.error || "")}</p>`;
+    const html = `<p class="hint">${esc(s.error || "")}</p>`;
+    if (extra.innerHTML !== html) extra.innerHTML = html;
+  } else if (extra.childElementCount) {
+    extra.innerHTML = "";
   }
 
+  // Rebuild the action row only when the set of buttons actually changes.
   const actions = card.querySelector(".sc-actions");
+  const wantEula = !s.eula && s.status !== "installing" && s.status !== "install_failed";
+  const key = wantEula ? "eula" : s.status;
+  if (actions.dataset.key === key) return;
+  actions.dataset.key = key;
+  actions.innerHTML = "";
+
   const stopClick = (fn) => (e) => { e.stopPropagation(); fn(); };
-  if (s.status === "stopped") {
-    const b = el(`<button class="btn btn-ok btn-sm">${ICONS.play} ${t("actions.start")}</button>`);
-    b.addEventListener("click", stopClick(() => serverAction(s.id, "start")));
+  const add = (cls, label, fn) => {
+    const b = el(`<button class="btn btn-sm ${cls}">${label}</button>`);
+    b.addEventListener("click", stopClick(fn));
     actions.appendChild(b);
+  };
+  if (wantEula) {
+    add("btn-ok", t("eula.accept"), () => acceptEula([s.id]));
+  } else if (s.status === "stopped") {
+    add("btn-ok", `${ICONS.play} ${t("actions.start")}`, () => serverAction(s.id, "start"));
   } else if (s.status === "running" || s.status === "starting") {
-    const b = el(`<button class="btn btn-sm">${ICONS.stop} ${t("actions.stop")}</button>`);
-    b.addEventListener("click", stopClick(() => serverAction(s.id, "stop")));
-    actions.appendChild(b);
+    add("", `${ICONS.stop} ${t("actions.stop")}`, () => serverAction(s.id, "stop"));
   } else if (s.status === "install_failed") {
-    const b = el(`<button class="btn btn-sm">${ICONS.restart} ${t("actions.retryInstall")}</button>`);
-    b.addEventListener("click", stopClick(() => serverAction(s.id, "retry-install")));
-    actions.appendChild(b);
+    add("", `${ICONS.restart} ${t("actions.retryInstall")}`, () => serverAction(s.id, "retry-install"));
   }
-  return card;
 }
 
 async function serverAction(id, action) {
@@ -561,9 +695,19 @@ function renderDetailHead(s) {
     });
     actions.appendChild(b);
   };
+  const needsEula = !s.eula && s.status !== "installing" && s.status !== "install_failed";
+  if (needsEula) {
+    add("btn-ok", "", t("eula.accept"), async () => {
+      try {
+        await api(`/api/servers/${encodeURIComponent(s.id)}/eula`, { method: "POST", body: { accept: true } });
+        toast(t("eula.accepted"), "ok");
+        await updateDetailHead(s.id);
+      } catch (e) { toastError(e); }
+    });
+  }
   switch (s.status) {
     case "stopped":
-      add("btn-ok", ICONS.play, t("actions.start"), () => serverAction(s.id, "start"));
+      if (!needsEula) add("btn-ok", ICONS.play, t("actions.start"), () => serverAction(s.id, "start"));
       break;
     case "running":
     case "starting":

@@ -44,6 +44,7 @@ type Handler struct {
 type javaInfo struct {
 	Found   bool   `json:"found"`
 	Version string `json:"version,omitempty"`
+	Major   int    `json:"major,omitempty"`
 }
 
 func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool) http.Handler {

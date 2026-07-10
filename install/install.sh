@@ -129,6 +129,11 @@ if ! command -v java >/dev/null 2>&1; then
   say "NOTE: Java was not found. Minecraft servers need a Java runtime:"
   say "  Debian/Ubuntu:  apt install -y openjdk-21-jre-headless"
   say "  RHEL/Alma:      dnf install -y java-21-openjdk-headless"
+  say "  Minecraft 26.1 and newer needs Java 25, install openjdk-25 instead."
+else
+  say "Java found: $(java -version 2>&1 | head -1)"
+  say "Note that Minecraft 26.1 and newer needs Java 25. The panel tells you"
+  say "before a server starts if the installed Java is too old."
 fi
 
 IP=$( (hostname -I 2>/dev/null || true) | awk '{print $1}' || true)
