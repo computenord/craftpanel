@@ -95,6 +95,68 @@ sudo CRAFTPANEL_URL=http://YOUR-IP:8000/craftpanel-linux-amd64 bash install.sh
 
 Afterwards `sudo bash install.sh --uninstall` removes the service and binary again, keeping `/var/lib/craftpanel`.
 
+## Manual install (copying files by hand)
+
+The installer does nothing magic. If you would rather copy the binary over yourself, for example while the repo is still private, these are the same steps by hand.
+
+Copy `dist/craftpanel-linux-amd64` to the host with whatever you like: `scp`, WinSCP, a USB stick. Then, as root on the host:
+
+```bash
+# 1. verify you copied it intact (compare against dist/SHA256SUMS)
+sha256sum /tmp/craftpanel-linux-amd64
+
+# 2. put the binary in place
+install -m 755 /tmp/craftpanel-linux-amd64 /usr/local/bin/craftpanel
+
+# 3. create the service user and its data directory
+useradd --system --home-dir /var/lib/craftpanel --shell /usr/sbin/nologin craftpanel
+mkdir -p /var/lib/craftpanel
+chown -R craftpanel:craftpanel /var/lib/craftpanel
+chmod 750 /var/lib/craftpanel
+
+# 4. install the unit (copy install/craftpanel.service verbatim)
+cp craftpanel.service /etc/systemd/system/craftpanel.service
+systemctl daemon-reload
+systemctl enable --now craftpanel
+
+# 5. Java for the Minecraft servers
+apt install -y openjdk-21-jre-headless
+```
+
+On RHEL and Alma the nologin shell is `/sbin/nologin`, adjust step 3 accordingly.
+
+Check it came up with `systemctl status craftpanel` and `journalctl -u craftpanel -f`, then open `http://HOST:8420`.
+
+To try it without systemd at all, just run the binary as your own user. It writes everything below the `-data` directory and needs no root:
+
+```bash
+./craftpanel-linux-amd64 -addr :8420 -data ~/craftpanel-test
+```
+
+Removing a manual install: `systemctl disable --now craftpanel`, then delete `/etc/systemd/system/craftpanel.service`, `/usr/local/bin/craftpanel` and, if you want the worlds gone too, `/var/lib/craftpanel`.
+
+## Data layout
+
+Everything the panel owns lives under the data directory:
+
+```
+/var/lib/craftpanel/
+  users.json            accounts (argon2id hashes)
+  sessions.json         active sessions, tokens stored hashed
+  servers/
+    my-server/
+      server.json       panel config: type, version, port, memory, autostart
+      data/             the Minecraft server itself
+        server.jar
+        eula.txt
+        server.properties
+        world/
+```
+
+That means backups are a plain copy of the data directory, and moving the panel to another host is copying it across. Stop the service first so no world is written mid-copy.
+
+To adopt an existing Minecraft server, create a server in the UI with the matching version, stop it, then copy your old `world/`, `plugins/` and `server.properties` into that server's `data/` folder. Keep ownership right afterwards: `chown -R craftpanel:craftpanel /var/lib/craftpanel`.
+
 ## License and trademarks
 
 Minecraft is a trademark of Mojang Synergies AB. This project is not affiliated with Mojang or Microsoft. Accepting the Minecraft EULA is a decision of each server operator.
