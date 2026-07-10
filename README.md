@@ -52,7 +52,9 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 **The boring but necessary parts.** One click to accept the Minecraft EULA, a `server.properties` editor that preserves your comments and unknown keys, autostart on boot, a console with command history, filtering and log download, and a graceful shutdown that lets every world save before the process exits.
 
-**Two-factor authentication.** TOTP works with every standard authenticator app. The panel also tells you when a newer Craftpanel release is available.
+**Two-factor authentication.** TOTP works with every standard authenticator app.
+
+**Updates itself.** The panel checks for new releases and updates in place at the click of a button: checksum-verified download, clean server shutdown, automatic restart. The systemd unit grants the service write access to exactly one file outside its data directory, its own binary.
 
 **Security that is actually there.** Passwords are hashed with argon2id, sign in is rate limited per IP, session tokens are random 256 bit values stored hashed on disk, every mutating request needs a custom header so cross-site requests cannot forge one, and the systemd unit runs the panel sandboxed as its own unprivileged user.
 
@@ -80,7 +82,7 @@ Danach `http://DEINE-SERVER-IP:8420` im Browser öffnen und das Admin-Konto anle
 
 ### Upgrading and uninstalling
 
-Run the install command again to upgrade. It stops the service, swaps the binary and starts it back up, backing up your unit file first.
+The panel updates itself: when a new release is out, the dashboard shows a banner with an update button. One click downloads the new binary, verifies its checksum, stops your servers cleanly and restarts the panel. Alternatively, run the install command again; it does the same from the shell and also refreshes the service configuration.
 
 ```bash
 # removes the service and the binary, keeps /var/lib/craftpanel

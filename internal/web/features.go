@@ -2,12 +2,17 @@ package web
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -289,4 +294,140 @@ func (h *Handler) updateInfo() (latest string, available bool) {
 		return latest, false
 	}
 	return latest, latest != strings.TrimPrefix(h.Version, "v")
+}
+
+/* ---------- self update ---------- */
+
+const releaseDownloadBase = "https://github.com/computenord/craftpanel/releases/latest/download/"
+
+// systemUpdate downloads the latest release binary, verifies it against the
+// release's SHA256SUMS, atomically swaps the running executable and asks the
+// main loop for a graceful restart. Requires the install layout where the
+// binary is owned and writable by the service user.
+func (h *Handler) systemUpdate(w http.ResponseWriter, r *http.Request) {
+	latest, available := h.updateInfo()
+	if !available {
+		apiError(w, http.StatusBadRequest, "no_update", "already up to date")
+		return
+	}
+	if runtime.GOOS != "linux" {
+		apiError(w, http.StatusBadRequest, "self_update_unsupported", "self update only works on Linux installs")
+		return
+	}
+	exe, err := os.Executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	// The rename below needs a writable binary directory. Old installs have a
+	// root-owned binary; rerunning the installer once fixes the layout.
+	probe, err := os.CreateTemp(filepath.Dir(exe), ".craftpanel-update-*")
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "self_update_unsupported",
+			"the panel cannot replace its own binary on this install, run the install command from the README once")
+		return
+	}
+	probe.Close()
+	os.Remove(probe.Name())
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	asset := "craftpanel-linux-" + runtime.GOARCH
+
+	sums, err := fetchText(ctx, releaseDownloadBase+"SHA256SUMS", 1<<20)
+	if err != nil {
+		apiError(w, http.StatusBadGateway, "upstream", "download checksums: "+err.Error())
+		return
+	}
+	wantSum := ""
+	for _, line := range strings.Split(sums, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && strings.TrimPrefix(fields[len(fields)-1], "*") == asset {
+			wantSum = fields[0]
+			break
+		}
+	}
+	if wantSum == "" {
+		apiError(w, http.StatusBadGateway, "upstream", "release has no checksum for "+asset)
+		return
+	}
+
+	tmp := exe + ".new"
+	if err := downloadChecked(ctx, releaseDownloadBase+asset, tmp, wantSum); err != nil {
+		os.Remove(tmp)
+		apiError(w, http.StatusBadGateway, "upstream", "download binary: "+err.Error())
+		return
+	}
+	if err := os.Chmod(tmp, 0o755); err != nil {
+		os.Remove(tmp)
+		apiError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	if err := os.Rename(tmp, exe); err != nil {
+		os.Remove(tmp)
+		apiError(w, http.StatusInternalServerError, "internal", "replace binary: "+err.Error())
+		return
+	}
+
+	log.Printf("self update: installed %s, restarting", latest)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": latest})
+	if h.Restart != nil {
+		go func() {
+			time.Sleep(500 * time.Millisecond) // let the response reach the client
+			h.Restart()
+		}()
+	}
+}
+
+func fetchText(ctx context.Context, url string, limit int64) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "ComputeBox-Craftpanel")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", errors.New(resp.Status)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+	return string(data), err
+}
+
+func downloadChecked(ctx context.Context, url, dest, wantSum string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "ComputeBox-Craftpanel")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return errors.New(resp.Status)
+	}
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	if err != nil {
+		return err
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(f, hasher), resp.Body); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if !strings.EqualFold(hex.EncodeToString(hasher.Sum(nil)), wantSum) {
+		return errors.New("checksum mismatch")
+	}
+	return nil
 }

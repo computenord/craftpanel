@@ -10,7 +10,7 @@ Type=simple
 User=craftpanel
 Group=craftpanel
 ExecStart=/usr/local/bin/craftpanel -data /var/lib/craftpanel -addr :8420
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 # Only signal the panel itself on stop. It shuts its Minecraft servers down
@@ -22,7 +22,8 @@ TimeoutStopSec=90
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/craftpanel
+# The binary itself is writable so the panel can self update from the web UI.
+ReadWritePaths=/var/lib/craftpanel /usr/local/bin/craftpanel
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

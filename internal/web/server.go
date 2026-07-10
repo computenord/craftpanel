@@ -35,6 +35,9 @@ type Handler struct {
 	// X-Forwarded-For. Only enable it when a reverse proxy sets that header,
 	// otherwise clients can forge their own rate limit bucket.
 	TrustProxy bool
+	// Restart asks the main loop for a graceful shutdown with a restart exit
+	// code. Set by main, used by the self update endpoint.
+	Restart func()
 
 	javaMu      sync.Mutex
 	javaInfo    javaInfo
@@ -51,8 +54,8 @@ type javaInfo struct {
 	Major   int    `json:"major,omitempty"`
 }
 
-func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool) http.Handler {
-	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy}
+func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool, restart func()) http.Handler {
+	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy, Restart: restart}
 
 	mux := http.NewServeMux()
 
@@ -98,6 +101,7 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 
 	mux.HandleFunc("GET /api/settings", h.getSettings)
 	mux.HandleFunc("PUT /api/settings", h.putSettings)
+	mux.HandleFunc("POST /api/system/update", h.systemUpdate)
 	mux.HandleFunc("POST /api/account/totp/init", h.totpInit)
 	mux.HandleFunc("POST /api/account/totp/enable", h.totpEnable)
 	mux.HandleFunc("POST /api/account/totp/disable", h.totpDisable)

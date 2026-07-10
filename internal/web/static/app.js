@@ -371,7 +371,12 @@ async function renderDash() {
   c.querySelector("#new-server").addEventListener("click", openCreateModal);
   if (sys && sys.updateAvailable && localStorage.getItem("cp_hide_update") !== sys.latest) {
     const b = el(`<div class="notice">${esc(t("update.banner", { v: sys.latest }))}
+      <button class="btn btn-ok btn-sm" id="upd-now">${t("update.now")}</button>
       <button class="btn btn-ghost btn-sm" id="upd-hide">${t("update.dismiss")}</button></div>`);
+    b.querySelector("#upd-now").addEventListener("click", (e) => {
+      e.target.disabled = true;
+      doSelfUpdate();
+    });
     b.querySelector("#upd-hide").addEventListener("click", () => {
       localStorage.setItem("cp_hide_update", sys.latest);
       b.remove();
@@ -1430,6 +1435,40 @@ async function loadAccess(id) {
   if (!info.bedrock) wire("#op-name", "#op-add", "ops");
 }
 
+/* ---------- self update ---------- */
+
+// Triggers the in-place panel update, then waits for the restarted process to
+// come back with a different version before reloading the page.
+async function doSelfUpdate() {
+  const oldVersion = sys ? sys.version : "";
+  try {
+    await api("/api/system/update", { method: "POST", body: {} });
+  } catch (e) {
+    toastError(e);
+    return;
+  }
+  closeModal();
+  stopPolling();
+  stopTabTimer();
+  const wait = el(`<div class="overlay"><div class="modal"><h2>${t("update.updating")}</h2>
+    <p class="hint">${t("update.waiting")}</p></div></div>`);
+  document.body.appendChild(wait);
+  const poll = async () => {
+    try {
+      const res = await fetch("/api/setup-status", { cache: "no-store" });
+      if (res.ok) {
+        const st = await res.json();
+        if (st.version && st.version !== oldVersion) {
+          location.reload();
+          return;
+        }
+      }
+    } catch {}
+    setTimeout(poll, 2000);
+  };
+  setTimeout(poll, 3000);
+}
+
 /* ---------- panel settings modal ---------- */
 
 async function openPanelSettings() {
@@ -1441,7 +1480,7 @@ async function openPanelSettings() {
   } catch {}
 
   const updateLine = sys && sys.updateAvailable
-    ? " · " + esc(t("panel.updateAvailable", { v: sys.latest }))
+    ? ` · ${esc(t("panel.updateAvailable", { v: sys.latest }))} <button class="btn btn-ok btn-sm" id="ps-update">${t("update.now")}</button>`
     : "";
   const box = el(`<div>
     <h2>${t("panel.title")}</h2>
@@ -1457,6 +1496,13 @@ async function openPanelSettings() {
   openModal(box);
   box.querySelector("#ps-backupdir").value = settings.backupDir || "";
   box.querySelector("#ps-close").addEventListener("click", closeModal);
+  const updBtn = box.querySelector("#ps-update");
+  if (updBtn) {
+    updBtn.addEventListener("click", (e) => {
+      e.target.disabled = true;
+      doSelfUpdate();
+    });
+  }
   box.querySelector("#ps-save").addEventListener("click", async () => {
     try {
       await api("/api/settings", { method: "PUT", body: { backupDir: box.querySelector("#ps-backupdir").value.trim() } });

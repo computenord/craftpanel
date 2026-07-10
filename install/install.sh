@@ -67,12 +67,17 @@ if systemctl is-active --quiet craftpanel; then
   say "Stopping running panel for the upgrade"
   systemctl stop craftpanel
 fi
-install -m 755 "$TMP" "$BIN"
 
 if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
   say "Creating system user $SERVICE_USER"
   useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
+
+# The binary belongs to the service user so the panel can update itself from
+# the web UI. ReadWritePaths below limits that write access to exactly this
+# one file.
+install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$TMP" "$BIN"
+
 mkdir -p "$DATA_DIR"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 chmod 750 "$DATA_DIR"
@@ -95,7 +100,7 @@ Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_USER
 ExecStart=$BIN -data $DATA_DIR -addr :$PORT
-Restart=on-failure
+Restart=always
 RestartSec=3
 
 # Only signal the panel itself on stop. It shuts its Minecraft servers down
@@ -107,7 +112,7 @@ TimeoutStopSec=90
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$DATA_DIR
+ReadWritePaths=$DATA_DIR $BIN
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -94,16 +95,25 @@ func runServe(dataDir, addr string, trustProxy bool) error {
 	baseCtx, cancelBase := context.WithCancel(context.Background())
 	defer cancelBase()
 
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	// The self update endpoint triggers the same graceful shutdown as a signal
+	// and then exits non-zero so systemd starts the freshly swapped binary.
+	ctx, cancelForRestart := context.WithCancel(sigCtx)
+	defer cancelForRestart()
+	var restartRequested atomic.Bool
+	requestRestart := func() {
+		restartRequested.Store(true)
+		cancelForRestart()
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           web.New(authStore, manager, versions, version, trustProxy),
+		Handler:           web.New(authStore, manager, versions, version, trustProxy, requestRestart),
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	go manager.StartAutostarts()
 
@@ -133,6 +143,12 @@ func runServe(dataDir, addr string, trustProxy bool) error {
 	stopCtx, cancelStop := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancelStop()
 	manager.StopAll(stopCtx)
+	if restartRequested.Load() {
+		// Non-zero exit so both Restart=always and Restart=on-failure units
+		// bring the new binary up.
+		log.Printf("restarting into the updated binary")
+		os.Exit(1)
+	}
 	log.Printf("bye")
 	return nil
 }
