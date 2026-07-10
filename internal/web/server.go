@@ -102,6 +102,7 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("GET /api/settings", h.getSettings)
 	mux.HandleFunc("PUT /api/settings", h.putSettings)
 	mux.HandleFunc("POST /api/system/update", h.systemUpdate)
+	mux.HandleFunc("POST /api/system/check-update", h.checkUpdate)
 	mux.HandleFunc("POST /api/account/totp/init", h.totpInit)
 	mux.HandleFunc("POST /api/account/totp/enable", h.totpEnable)
 	mux.HandleFunc("POST /api/account/totp/disable", h.totpDisable)

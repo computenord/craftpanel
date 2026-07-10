@@ -1579,6 +1579,41 @@ async function loadAccess(id) {
 
 /* ---------- self update ---------- */
 
+// renderVersionLine shows the installed version in the panel settings modal,
+// with a manual update check and, when one is available, the update button.
+function renderVersionLine(box) {
+  const host = box.querySelector("#ps-version");
+  if (!host) return;
+  const upd = sys && sys.updateAvailable
+    ? ` · ${esc(t("panel.updateAvailable", { v: sys.latest }))} <button class="btn btn-ok btn-sm" id="ps-update">${t("update.now")}</button>`
+    : "";
+  host.innerHTML = `${t("panel.version")}: ${sys ? esc(sys.version) : "?"}${upd}
+    <button class="btn btn-ghost btn-sm" id="ps-check">${t("panel.checkUpdate")}</button>`;
+  const updBtn = host.querySelector("#ps-update");
+  if (updBtn) {
+    updBtn.addEventListener("click", (e) => {
+      e.target.disabled = true;
+      doSelfUpdate();
+    });
+  }
+  host.querySelector("#ps-check").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const res = await api("/api/system/check-update", { method: "POST", body: {} });
+      if (sys) {
+        sys.latest = res.latest;
+        sys.updateAvailable = res.updateAvailable;
+      }
+      if (!res.latest) toast(t("panel.checkFailed"), "err");
+      else if (res.updateAvailable) toast(t("panel.updateAvailable", { v: res.latest }), "ok");
+      else toast(t("panel.upToDate", { v: res.version }), "ok");
+    } catch (err) {
+      toastError(err);
+    }
+    renderVersionLine(box);
+  });
+}
+
 // Triggers the in-place panel update, then waits for the restarted process to
 // come back with a different version before reloading the page.
 async function doSelfUpdate() {
@@ -1621,12 +1656,9 @@ async function openPanelSettings() {
     meTotp = !!info.totp;
   } catch {}
 
-  const updateLine = sys && sys.updateAvailable
-    ? ` · ${esc(t("panel.updateAvailable", { v: sys.latest }))} <button class="btn btn-ok btn-sm" id="ps-update">${t("update.now")}</button>`
-    : "";
   const box = el(`<div>
     <h2>${t("panel.title")}</h2>
-    <p class="hint">${t("panel.version")}: ${sys ? esc(sys.version) : "?"}${updateLine}</p>
+    <p class="hint" id="ps-version"></p>
     <label class="field"><span>${t("panel.backupDir")}</span><input type="text" id="ps-backupdir"></label>
     <p class="hint">${esc(t("panel.backupDirHint"))}</p>
     <div class="modal-actions"><button class="btn btn-primary" id="ps-save">${t("settings.save")}</button></div>
@@ -1636,15 +1668,9 @@ async function openPanelSettings() {
     <div class="modal-actions"><button class="btn btn-ghost" id="ps-close">${t("misc.close")}</button></div>
   </div>`);
   openModal(box);
+  renderVersionLine(box);
   box.querySelector("#ps-backupdir").value = settings.backupDir || "";
   box.querySelector("#ps-close").addEventListener("click", closeModal);
-  const updBtn = box.querySelector("#ps-update");
-  if (updBtn) {
-    updBtn.addEventListener("click", (e) => {
-      e.target.disabled = true;
-      doSelfUpdate();
-    });
-  }
   box.querySelector("#ps-save").addEventListener("click", async () => {
     try {
       await api("/api/settings", { method: "PUT", body: { backupDir: box.querySelector("#ps-backupdir").value.trim() } });

@@ -329,6 +329,19 @@ func (h *Handler) updateInfo() (latest string, available bool) {
 	return latest, latest != strings.TrimPrefix(h.Version, "v")
 }
 
+// checkUpdate bypasses the 12 hour cache and asks GitHub right now.
+func (h *Handler) checkUpdate(w http.ResponseWriter, r *http.Request) {
+	h.updMu.Lock()
+	h.updAt = time.Time{}
+	h.updMu.Unlock()
+	latest, available := h.updateInfo()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":         h.Version,
+		"latest":          latest,
+		"updateAvailable": available,
+	})
+}
+
 /* ---------- self update ---------- */
 
 const releaseDownloadBase = "https://github.com/computenord/craftpanel/releases/latest/download/"
