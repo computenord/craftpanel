@@ -4,8 +4,10 @@
 const $app = document.getElementById("app");
 
 let me = null;
+let meTotp = false;
 let sys = null;
 let pollTimer = null;
+let tabTimer = null;
 let consoleES = null;
 let currentDetailId = null;
 
@@ -60,7 +62,9 @@ const ICONS = {
   tag: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M5 2h6M8 2v12M5 14h6"/></svg>',
   copy: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="5" y="5" width="9" height="9"/><path d="M11 5V2H2v9h3"/></svg>',
   plus: '<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 2v12M2 8h12"/></svg>',
-  upload: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 10V2M4.5 5L8 1.5 11.5 5M2.5 13.5h11"/></svg>'
+  upload: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 10V2M4.5 5L8 1.5 11.5 5M2.5 13.5h11"/></svg>',
+  gear: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="2.4"/><path d="M8 1.2v2.1M8 12.7v2.1M1.2 8h2.1M12.7 8h2.1M3.2 3.2l1.5 1.5M11.3 11.3l1.5 1.5M12.8 3.2l-1.5 1.5M4.7 11.3l-1.5 1.5"/></svg>',
+  archive: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1.5" y="2.5" width="13" height="3.5"/><path d="M2.5 6v7.5h11V6M6 9h4"/></svg>'
 };
 
 /* ---------- api ---------- */
@@ -182,7 +186,9 @@ async function boot() {
   }
   if (st.needsSetup) return renderSetup();
   try {
-    me = (await api("/api/me", { noAuthRedirect: true })).username;
+    const info = await api("/api/me", { noAuthRedirect: true });
+    me = info.username;
+    meTotp = !!info.totp;
   } catch {
     return renderLogin();
   }
@@ -210,21 +216,34 @@ function renderLogin() {
     <div id="login-err"></div>
     <label class="field"><span>${t("login.username")}</span><input type="text" name="username" autocomplete="username" required></label>
     <label class="field"><span>${t("login.password")}</span><input type="password" name="password" autocomplete="current-password" required></label>
+    <label class="field" id="totp-row" hidden><span>${t("totp.loginCode")}</span><input type="text" name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>
     <button class="btn btn-primary" type="submit">${t("login.submit")}</button>
   </form>`);
   wrap.querySelector("#login-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = e.target;
     try {
-      me = (await api("/api/login", {
+      const data = await api("/api/login", {
         method: "POST",
         noAuthRedirect: true,
-        body: { username: f.username.value.trim(), password: f.password.value }
-      })).username;
+        body: { username: f.username.value.trim(), password: f.password.value, code: f.code.value.trim() }
+      });
+      me = data.username;
+      meTotp = true; // refreshed on next boot; only used for the settings modal
+      const info = await api("/api/me").catch(() => null);
+      if (info) meTotp = !!info.totp;
       sys = await api("/api/system").catch(() => null);
       renderShellAndRoute();
     } catch (err) {
       const box = wrap.querySelector("#login-err");
+      const totpRow = wrap.querySelector("#totp-row");
+      if (err.code === "totp_required") {
+        totpRow.hidden = false;
+        f.code.focus();
+        box.innerHTML = "";
+        return;
+      }
+      if (err.code === "totp_invalid") totpRow.hidden = false;
       box.innerHTML = `<div class="form-error">${esc(STRINGS.en["error." + err.code] ? t("error." + err.code) : err.message)}</div>`;
     }
   });
@@ -275,6 +294,7 @@ function renderShellAndRoute() {
         <button data-lang="de" class="${LANG === "de" ? "active" : ""}">DE</button>
         <button data-lang="en" class="${LANG === "en" ? "active" : ""}">EN</button>
       </div>
+      <button class="btn btn-ghost btn-sm" id="panel-settings-btn" title="${t("panel.title")}">${ICONS.gear}</button>
       <div class="userbox"><span>${esc(me)}</span><button class="btn btn-ghost btn-sm" id="logout">${t("nav.logout")}</button></div>
     </header>
     <main id="content"></main>
@@ -285,6 +305,7 @@ function renderShellAndRoute() {
   </div>`);
   $app.appendChild(shell);
   shell.querySelector("#wm").addEventListener("click", () => { location.hash = "#/"; });
+  shell.querySelector("#panel-settings-btn").addEventListener("click", openPanelSettings);
   shell.querySelector("#logout").addEventListener("click", async () => {
     try { await api("/api/logout", { method: "POST" }); } catch {}
     me = null;
@@ -303,8 +324,13 @@ window.addEventListener("hashchange", () => {
   if (me && document.getElementById("content")) route();
 });
 
+function stopTabTimer() {
+  if (tabTimer) { clearInterval(tabTimer); tabTimer = null; }
+}
+
 function route() {
   stopPolling();
+  stopTabTimer();
   closeConsole();
   closeModal();
   const h = location.hash || "#/";
@@ -338,10 +364,20 @@ async function renderDash() {
   const c = content();
   c.innerHTML = `<div class="page-head"><h1>${t("dash.title")}</h1>
     <button class="btn btn-primary" id="new-server">${ICONS.plus} ${t("dash.new")}</button></div>
+    <div id="update-banner"></div>
     <div id="eula-banner"></div>
     <div id="java-warning"></div>
     <div id="server-grid"></div>`;
   c.querySelector("#new-server").addEventListener("click", openCreateModal);
+  if (sys && sys.updateAvailable && localStorage.getItem("cp_hide_update") !== sys.latest) {
+    const b = el(`<div class="notice">${esc(t("update.banner", { v: sys.latest }))}
+      <button class="btn btn-ghost btn-sm" id="upd-hide">${t("update.dismiss")}</button></div>`);
+    b.querySelector("#upd-hide").addEventListener("click", () => {
+      localStorage.setItem("cp_hide_update", sys.latest);
+      b.remove();
+    });
+    c.querySelector("#update-banner").appendChild(b);
+  }
   await refreshDash();
   startPolling(refreshDash, 3000);
 }
@@ -494,6 +530,8 @@ function updateServerCard(card, s) {
   const metaHTML = `<span>${esc(s.type)} <b>${esc(s.version)}</b></span>
     <span>${t("misc.port")} <b>${s.port}</b></span>
     ${s.javaMajor ? `<span>${esc(t("java.needs", { need: s.javaMajor }))}</span>` : ""}
+    ${s.status === "running" && s.players ? `<span>${t("players.label")} <b>${s.players.online}/${s.players.max}</b></span>` : ""}
+    ${s.status === "running" && s.rssMB ? `<span>RAM <b>${s.rssMB} MB</b></span>` : ""}
     ${s.status === "running" ? `<span>${t("detail.uptime")} <b>${fmtUptime(s.uptimeS)}</b></span>` : ""}`;
   if (meta.innerHTML !== metaHTML) meta.innerHTML = metaHTML;
 
@@ -641,6 +679,7 @@ async function renderDetail(id, tab) {
     <nav class="tabs" id="tabs">
       <button data-tab="console">${t("tabs.console")}</button>
       <button data-tab="files">${t("tabs.files")}</button>
+      <button data-tab="backups">${t("tabs.backups")}</button>
       <button data-tab="settings">${t("tabs.settings")}</button>
     </nav>
     <section id="tab-body"></section>`;
@@ -652,6 +691,7 @@ async function renderDetail(id, tab) {
     });
   });
   if (tab === "files") renderFilesTab(id);
+  else if (tab === "backups") renderBackupsTab(id);
   else if (tab === "settings") renderSettingsTab(id, s);
   else renderConsoleTab(id, s);
 
@@ -675,6 +715,10 @@ function renderDetailHead(s) {
       <span>${t("detail.address")} <code>${esc(addr)}</code>
         <button class="btn btn-ghost btn-sm" id="copy-addr" title="${t("detail.copy")}">${ICONS.copy}</button></span>
       ${s.status === "running" ? `<span>${t("detail.uptime")} ${fmtUptime(s.uptimeS)}</span>` : ""}
+      ${s.status === "running" && s.players ? `<span>${t("players.label")} ${s.players.online}/${s.players.max}</span>` : ""}
+      ${s.status === "running" && s.rssMB ? `<span>RAM ${s.rssMB} MB</span>` : ""}
+      ${s.status === "running" && s.cpuPct ? `<span>CPU ${s.cpuPct}%</span>` : ""}
+      ${s.diskMB ? `<span>${t("misc.disk")} ${fmtSize(s.diskMB * 1048576)}</span>` : ""}
       ${s.status === "installing" ? `<span>${t("detail.installing")} (${Math.round(s.progress * 100)}%)</span>` : ""}
       ${s.status === "install_failed" ? `<span class="c-err">${esc(s.error || "")}</span>` : ""}
     </div>`;
@@ -743,6 +787,10 @@ function closeConsole() {
 function renderConsoleTab(id, s) {
   const body = document.getElementById("tab-body");
   body.innerHTML = `
+    <div class="console-tools">
+      <input type="text" id="console-filter" placeholder="${esc(t("console.filter"))}">
+      <button class="btn btn-sm" id="console-dl">${ICONS.download} ${t("console.download")}</button>
+    </div>
     <div class="console-box" id="console"></div>
     <form class="console-form" id="cmd-form">
       <span class="prompt">&gt;</span>
@@ -754,6 +802,23 @@ function renderConsoleTab(id, s) {
       <label for="autoscroll">${t("console.autoscroll")}</label>
     </div>`;
   const box = body.querySelector("#console");
+
+  const filterInput = body.querySelector("#console-filter");
+  filterInput.addEventListener("input", () => {
+    const q = filterInput.value.toLowerCase();
+    for (const div of box.children) {
+      div.classList.toggle("hide", q !== "" && !div.textContent.toLowerCase().includes(q));
+    }
+  });
+  body.querySelector("#console-dl").addEventListener("click", () => {
+    const text = [...box.children].map((d) => d.textContent).join("\n");
+    const blob = new Blob([text], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = id + "-console.txt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
   let sawLine = false;
 
   closeConsole();
@@ -779,12 +844,42 @@ function renderConsoleTab(id, s) {
     }
   });
 
+  // Command history: arrow keys walk previous commands, per server.
+  const histKey = "cp_hist_" + id;
+  let hist = [];
+  try { hist = JSON.parse(localStorage.getItem(histKey) || "[]"); } catch {}
+  let histIdx = -1;
+  let draft = "";
+  const cmdInput = body.querySelector("#cmd-input");
+  cmdInput.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp") {
+      if (histIdx < hist.length - 1) {
+        if (histIdx === -1) draft = cmdInput.value;
+        histIdx++;
+        cmdInput.value = hist[hist.length - 1 - histIdx];
+      }
+      e.preventDefault();
+    } else if (e.key === "ArrowDown") {
+      if (histIdx > -1) {
+        histIdx--;
+        cmdInput.value = histIdx === -1 ? draft : hist[hist.length - 1 - histIdx];
+      }
+      e.preventDefault();
+    }
+  });
+
   body.querySelector("#cmd-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const input = body.querySelector("#cmd-input");
-    const cmd = input.value.trim();
+    const cmd = cmdInput.value.trim();
     if (!cmd) return;
-    input.value = "";
+    cmdInput.value = "";
+    if (hist[hist.length - 1] !== cmd) {
+      hist.push(cmd);
+      if (hist.length > 100) hist.shift();
+      localStorage.setItem(histKey, JSON.stringify(hist));
+    }
+    histIdx = -1;
+    draft = "";
     try {
       await api(`/api/servers/${encodeURIComponent(id)}/command`, { method: "POST", body: { command: cmd } });
     } catch (err) {
@@ -802,6 +897,10 @@ function appendConsoleLine(box, line) {
   else if (/WARN/.test(line)) cls = "c-warn";
   if (cls) div.className = cls;
   div.textContent = line;
+  const filter = document.getElementById("console-filter");
+  if (filter && filter.value !== "" && !line.toLowerCase().includes(filter.value.toLowerCase())) {
+    div.classList.add("hide");
+  }
   box.appendChild(div);
   while (box.childElementCount > 2000) box.firstElementChild.remove();
   const auto = document.getElementById("autoscroll");
@@ -996,6 +1095,132 @@ async function openEditor(id, path, size) {
   });
 }
 
+/* ---------- backups tab ---------- */
+
+async function renderBackupsTab(id) {
+  const body = document.getElementById("tab-body");
+  body.innerHTML = `
+    <div class="panel">
+      <h2>${t("tabs.backups")}</h2>
+      <div class="files-bar">
+        <button class="btn btn-primary" id="bk-create">${ICONS.archive} ${t("backup.create")}</button>
+        <span class="badge st-installing" id="bk-busy" hidden><i class="led"></i>${t("backup.busy")}</span>
+      </div>
+      <div id="bk-list">${t("misc.loading")}</div>
+    </div>
+    <div class="panel">
+      <h2>${t("backup.auto")}</h2>
+      <form id="bk-auto">
+        <label class="check"><input type="checkbox" name="backupAuto"><span>${t("backup.auto")}</span></label>
+        <div class="form-row">
+          <label class="field"><span>${t("backup.time")}</span><input type="time" name="backupTime" value="04:00"></label>
+          <label class="field"><span>${t("backup.keep")}</span><input type="number" name="backupKeep" min="1" max="365" value="7"></label>
+        </div>
+        <p class="hint">${t("backup.keepHint")}</p>
+        <button class="btn btn-primary" type="submit">${t("settings.save")}</button>
+      </form>
+    </div>`;
+
+  try {
+    const s = await api("/api/servers/" + encodeURIComponent(id));
+    const f = body.querySelector("#bk-auto");
+    f.backupAuto.checked = !!s.backupAuto;
+    if (s.backupTime) f.backupTime.value = s.backupTime;
+    if (s.backupKeep) f.backupKeep.value = s.backupKeep;
+  } catch {}
+
+  body.querySelector("#bk-auto").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    try {
+      await api("/api/servers/" + encodeURIComponent(id), {
+        method: "PATCH",
+        body: {
+          backupAuto: f.backupAuto.checked,
+          backupTime: f.backupTime.value,
+          backupKeep: parseInt(f.backupKeep.value, 10) || 7
+        }
+      });
+      toast(t("settings.saved"), "ok");
+    } catch (err) { toastError(err); }
+  });
+
+  body.querySelector("#bk-create").addEventListener("click", async () => {
+    try {
+      await api(`/api/servers/${encodeURIComponent(id)}/backups`, { method: "POST", body: {} });
+      toast(t("backup.started"), "ok");
+      loadBackups(id);
+    } catch (e) { toastError(e); }
+  });
+
+  loadBackups(id);
+  stopTabTimer();
+  tabTimer = setInterval(() => loadBackups(id), 5000);
+}
+
+async function loadBackups(id) {
+  const host = document.getElementById("bk-list");
+  if (!host) return;
+  let list, s;
+  try {
+    [list, s] = await Promise.all([
+      api(`/api/servers/${encodeURIComponent(id)}/backups`),
+      api("/api/servers/" + encodeURIComponent(id))
+    ]);
+  } catch (e) {
+    if (e.status !== 401) toastError(e);
+    return;
+  }
+  const busy = document.getElementById("bk-busy");
+  if (busy) busy.hidden = !s.backupBusy;
+
+  if (list.length === 0) {
+    host.innerHTML = `<p class="hint">${t("backup.empty")}</p>`;
+    return;
+  }
+  host.innerHTML = `<table class="files">
+    <thead><tr><th>${t("files.name")}</th><th>${t("files.size")}</th><th>${t("files.modified")}</th><th></th></tr></thead>
+    <tbody></tbody></table>`;
+  const tbody = host.querySelector("tbody");
+  for (const b of list) {
+    const tr = el(`<tr>
+      <td><span class="fname">${ICONS.archive} ${esc(b.name)}</span></td>
+      <td class="fsize">${fmtSize(b.size)}</td>
+      <td class="fdate">${fmtDate(b.time)}</td>
+      <td class="facts"></td>
+    </tr>`);
+    const acts = tr.querySelector(".facts");
+    const btn = (icon, title, fn) => {
+      const x = el(`<button title="${esc(title)}">${icon}</button>`);
+      x.addEventListener("click", fn);
+      acts.appendChild(x);
+    };
+    btn(ICONS.download, t("files.download"), () => {
+      const a = document.createElement("a");
+      a.href = `/api/servers/${encodeURIComponent(id)}/backups/download?name=${encodeURIComponent(b.name)}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
+    btn(ICONS.restart, t("backup.restore"), async () => {
+      if (!(await confirmModal(t("backup.restoreConfirm", { name: b.name }), true))) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/backups/restore`, { method: "POST", body: { name: b.name } });
+        toast(t("backup.restoreStarted"), "ok");
+        loadBackups(id);
+      } catch (e) { toastError(e); }
+    });
+    btn(ICONS.trash, t("files.delete"), async () => {
+      if (!(await confirmModal(t("backup.deleteConfirm", { name: b.name }), true))) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/backups?name=${encodeURIComponent(b.name)}`, { method: "DELETE" });
+        loadBackups(id);
+      } catch (e) { toastError(e); }
+    });
+    tbody.appendChild(tr);
+  }
+}
+
 /* ---------- settings tab ---------- */
 
 async function renderSettingsTab(id, s) {
@@ -1022,8 +1247,25 @@ async function renderSettingsTab(id, s) {
         <p class="hint">${t("settings.javaPathHint")}</p>
         <label class="check"><input type="checkbox" name="autostart" ${s.autostart ? "checked" : ""}>
           <span>${t("settings.autostart")}</span></label>
+        <label class="check"><input type="checkbox" name="restartOnCrash" ${s.restartOnCrash ? "checked" : ""}>
+          <span>${t("settings.restartOnCrash")}</span></label>
         <button class="btn btn-primary" type="submit">${t("settings.save")}</button>
       </form>
+    </div>
+
+    <div class="panel">
+      <h2>${t("upgrade.title")}</h2>
+      <p class="hint">${t("upgrade.hint")}</p>
+      <div class="form-row">
+        <label class="field"><span>${t("create.version")}</span>
+          <select id="up-version"><option>${t("create.loadingVersions")}</option></select></label>
+      </div>
+      <button class="btn" id="up-btn">${ICONS.restart} ${t("upgrade.button")}</button>
+    </div>
+
+    <div class="panel">
+      <h2>${t("access.title")}</h2>
+      <div id="access-body">${t("misc.loading")}</div>
     </div>
 
     <div class="panel">
@@ -1052,7 +1294,8 @@ async function renderSettingsTab(id, s) {
           name: f.name.value.trim(),
           memoryMB: parseInt(f.memoryMB.value, 10),
           javaPath: f.javaPath.value.trim(),
-          autostart: f.autostart.checked
+          autostart: f.autostart.checked,
+          restartOnCrash: f.restartOnCrash.checked
         }
       });
       toast(t("settings.saved"), "ok");
@@ -1072,7 +1315,188 @@ async function renderSettingsTab(id, s) {
     } catch (e) { toastError(e); }
   });
 
+  (async () => {
+    const sel = body.querySelector("#up-version");
+    try {
+      const list = await api("/api/versions?type=" + s.type);
+      sel.innerHTML = list.map((v) =>
+        `<option value="${esc(v.id)}" ${v.id === s.version ? "selected" : ""}>${esc(v.id)}${v.latest ? " (latest)" : ""}</option>`).join("");
+    } catch {
+      sel.innerHTML = "<option></option>";
+    }
+  })();
+  body.querySelector("#up-btn").addEventListener("click", async () => {
+    const v = body.querySelector("#up-version").value;
+    if (!v || v === s.version) return;
+    if (!(await confirmModal(t("upgrade.confirm", { version: v }), false))) return;
+    try {
+      await api(`/api/servers/${encodeURIComponent(id)}/upgrade`, { method: "POST", body: { version: v } });
+      toast(t("upgrade.started"), "ok");
+      updateDetailHead(id);
+    } catch (e) { toastError(e); }
+  });
+
+  loadAccess(id);
   loadProperties(id);
+}
+
+/* ---------- whitelist and ops ---------- */
+
+async function loadAccess(id) {
+  const host = document.getElementById("access-body");
+  if (!host) return;
+  let info;
+  try {
+    info = await api(`/api/servers/${encodeURIComponent(id)}/access`);
+  } catch (e) {
+    host.textContent = "";
+    if (e.status !== 401) toastError(e);
+    return;
+  }
+  host.innerHTML = `
+    ${info.onlineMode ? "" : `<p class="hint">${t("access.offlineHint")}</p>`}
+    <label class="check"><input type="checkbox" id="wl-mode" ${info.whitelistOn ? "checked" : ""}>
+      <span>${t("access.enforce")}</span></label>
+    <h3 class="sub">${t("access.whitelistTitle")}</h3>
+    <ul class="plist" id="wl-list"></ul>
+    <div class="add-row">
+      <input type="text" id="wl-name" placeholder="${esc(t("access.placeholder"))}" maxlength="16">
+      <button class="btn btn-sm btn-primary" id="wl-add">${t("access.add")}</button>
+    </div>
+    <h3 class="sub">${t("access.opsTitle")}</h3>
+    <ul class="plist" id="op-list"></ul>
+    <div class="add-row">
+      <input type="text" id="op-name" placeholder="${esc(t("access.placeholder"))}" maxlength="16">
+      <button class="btn btn-sm btn-primary" id="op-add">${t("access.add")}</button>
+    </div>`;
+
+  const fillList = (ul, entries, list) => {
+    ul.innerHTML = "";
+    if (!entries.length) {
+      ul.appendChild(el(`<li class="pempty">${t("access.empty")}</li>`));
+      return;
+    }
+    for (const entry of entries) {
+      const li = el(`<li><span>${esc(entry.name)}</span><button title="${esc(t("files.delete"))}">${ICONS.trash}</button></li>`);
+      li.querySelector("button").addEventListener("click", async () => {
+        try {
+          await api(`/api/servers/${encodeURIComponent(id)}/access/${list}?name=${encodeURIComponent(entry.name)}`, { method: "DELETE" });
+          loadAccess(id);
+        } catch (err) { toastError(err); }
+      });
+      ul.appendChild(li);
+    }
+  };
+  fillList(host.querySelector("#wl-list"), info.whitelist, "whitelist");
+  fillList(host.querySelector("#op-list"), info.ops, "ops");
+
+  host.querySelector("#wl-mode").addEventListener("change", async (e) => {
+    try {
+      await api(`/api/servers/${encodeURIComponent(id)}/access/whitelist-mode`, { method: "PUT", body: { enabled: e.target.checked } });
+    } catch (err) {
+      toastError(err);
+      loadAccess(id);
+    }
+  });
+
+  const wire = (inputSel, btnSel, list) => {
+    const input = host.querySelector(inputSel);
+    const add = async () => {
+      const name = input.value.trim();
+      if (!name) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/access/${list}`, { method: "POST", body: { name } });
+        input.value = "";
+        loadAccess(id);
+      } catch (err) { toastError(err); }
+    };
+    host.querySelector(btnSel).addEventListener("click", add);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); add(); }
+    });
+  };
+  wire("#wl-name", "#wl-add", "whitelist");
+  wire("#op-name", "#op-add", "ops");
+}
+
+/* ---------- panel settings modal ---------- */
+
+async function openPanelSettings() {
+  let settings = { backupDir: "" };
+  try { settings = await api("/api/settings"); } catch {}
+  try {
+    const info = await api("/api/me");
+    meTotp = !!info.totp;
+  } catch {}
+
+  const updateLine = sys && sys.updateAvailable
+    ? " · " + esc(t("panel.updateAvailable", { v: sys.latest }))
+    : "";
+  const box = el(`<div>
+    <h2>${t("panel.title")}</h2>
+    <p class="hint">${t("panel.version")}: ${sys ? esc(sys.version) : "?"}${updateLine}</p>
+    <label class="field"><span>${t("panel.backupDir")}</span><input type="text" id="ps-backupdir"></label>
+    <p class="hint">${esc(t("panel.backupDirHint"))}</p>
+    <div class="modal-actions"><button class="btn btn-primary" id="ps-save">${t("settings.save")}</button></div>
+    <hr class="sep-line">
+    <h2>${t("totp.title")}</h2>
+    <div id="totp-body"></div>
+    <div class="modal-actions"><button class="btn btn-ghost" id="ps-close">${t("misc.close")}</button></div>
+  </div>`);
+  openModal(box);
+  box.querySelector("#ps-backupdir").value = settings.backupDir || "";
+  box.querySelector("#ps-close").addEventListener("click", closeModal);
+  box.querySelector("#ps-save").addEventListener("click", async () => {
+    try {
+      await api("/api/settings", { method: "PUT", body: { backupDir: box.querySelector("#ps-backupdir").value.trim() } });
+      toast(t("settings.saved"), "ok");
+    } catch (e) { toastError(e); }
+  });
+  renderTotpBody(box.querySelector("#totp-body"));
+}
+
+function renderTotpBody(host) {
+  if (meTotp) {
+    host.innerHTML = `<p class="hint">${t("totp.on")}</p>
+      <div class="add-row">
+        <input type="text" id="totp-code" placeholder="${esc(t("totp.code"))}" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+        <button class="btn btn-danger btn-sm" id="totp-off">${t("totp.disable")}</button>
+      </div>`;
+    host.querySelector("#totp-off").addEventListener("click", async () => {
+      try {
+        await api("/api/account/totp/disable", { method: "POST", body: { code: host.querySelector("#totp-code").value.trim() } });
+        meTotp = false;
+        renderTotpBody(host);
+        toast(t("totp.off"), "ok");
+      } catch (e) { toastError(e); }
+    });
+    return;
+  }
+  host.innerHTML = `<p class="hint">${t("totp.off")}</p>
+    <button class="btn btn-ok btn-sm" id="totp-start">${t("totp.enable")}</button>
+    <div id="totp-setup"></div>`;
+  host.querySelector("#totp-start").addEventListener("click", async () => {
+    let init;
+    try {
+      init = await api("/api/account/totp/init", { method: "POST", body: {} });
+    } catch (e) { toastError(e); return; }
+    const setup = host.querySelector("#totp-setup");
+    setup.innerHTML = `<p class="hint">${t("totp.setupHint")}</p>
+      <p class="totp-secret"><code>${esc(init.secret)}</code></p>
+      <p class="hint"><code class="wrap">${esc(init.url)}</code></p>
+      <div class="add-row">
+        <input type="text" id="totp-code2" placeholder="${esc(t("totp.code"))}" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+        <button class="btn btn-ok btn-sm" id="totp-confirm">${t("totp.confirm")}</button>
+      </div>`;
+    setup.querySelector("#totp-confirm").addEventListener("click", async () => {
+      try {
+        await api("/api/account/totp/enable", { method: "POST", body: { code: setup.querySelector("#totp-code2").value.trim() } });
+        meTotp = true;
+        renderTotpBody(host);
+        toast(t("totp.on"), "ok");
+      } catch (e) { toastError(e); }
+    });
+  });
 }
 
 function renderEulaState(id, accepted) {

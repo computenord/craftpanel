@@ -44,7 +44,15 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 **File manager.** Browse, upload, download, rename, delete and edit files in place. Every path goes through a kernel level jail, so neither `..` traversal nor a symlink can escape a server's directory.
 
-**The boring but necessary parts.** One click to accept the Minecraft EULA, a `server.properties` editor that preserves your comments and unknown keys, autostart on boot, and a graceful shutdown that lets every world save before the process exits.
+**Backups.** One click creates a consistent zip of the whole server (world saving is paused around the copy), scheduled daily backups with retention, restore and download from the browser, and a configurable backup directory so the zips can land on a mounted disk or NFS share. Note for the hardened systemd unit: an external backup path must be added to `ReadWritePaths` via `systemctl edit craftpanel`.
+
+**Player management.** Whitelist and OPs are managed in the UI. Names are validated against Mojang and get their real UUID; offline-mode servers get correct offline UUIDs instead. The dashboard shows who is online via the server list ping, plus RAM, CPU and disk usage per server.
+
+**Keeps servers alive.** Optional automatic restart after a crash, with exponential backoff so a broken server does not flap. Version upgrades keep the world: pick a new Minecraft version and the panel swaps the jar, only committing after a verified download.
+
+**The boring but necessary parts.** One click to accept the Minecraft EULA, a `server.properties` editor that preserves your comments and unknown keys, autostart on boot, a console with command history, filtering and log download, and a graceful shutdown that lets every world save before the process exits.
+
+**Two-factor authentication.** TOTP works with every standard authenticator app. The panel also tells you when a newer Craftpanel release is available.
 
 **Security that is actually there.** Passwords are hashed with argon2id, sign in is rate limited per IP, session tokens are random 256 bit values stored hashed on disk, every mutating request needs a custom header so cross-site requests cannot forge one, and the systemd unit runs the panel sandboxed as its own unprivileged user.
 

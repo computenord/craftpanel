@@ -32,18 +32,67 @@ type Event struct {
 // Proc supervises a single Minecraft server process: lifecycle, stdin
 // commands and a console ring buffer with live subscribers.
 type Proc struct {
-	mu        sync.Mutex
-	dir       string
-	state     string
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	exited    chan struct{}
-	startedAt time.Time
+	mu            sync.Mutex
+	dir           string
+	state         string
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	exited        chan struct{}
+	startedAt     time.Time
+	pid           int
+	stopRequested bool
+	exitHook      func(crashed bool, uptime time.Duration)
 
 	ring      []string
 	ringNext  int
 	ringCount int
 	subs      map[chan Event]struct{}
+}
+
+// SetExitHook registers a callback fired whenever the process exits. crashed
+// is true when nobody asked the server to stop.
+func (p *Proc) SetExitHook(hook func(crashed bool, uptime time.Duration)) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.exitHook = hook
+}
+
+// PID returns the java process id, or 0 when nothing is running.
+func (p *Proc) PID() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == StateStopped {
+		return 0
+	}
+	return p.pid
+}
+
+// Note writes a panel-generated line into the console stream.
+func (p *Proc) Note(line string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.appendLineLocked("[craftpanel] " + line)
+}
+
+// WaitForLine blocks until a console line containing substr appears or the
+// timeout elapses.
+func (p *Proc) WaitForLine(substr string, timeout time.Duration) bool {
+	_, ch, cancel := p.Subscribe()
+	defer cancel()
+	deadline := time.After(timeout)
+	for {
+		select {
+		case ev := <-ch:
+			if ev.Type == "line" && strings.Contains(ev.Line, substr) {
+				return true
+			}
+			if ev.Type == "status" && ev.Status == StateStopped {
+				return false
+			}
+		case <-deadline:
+			return false
+		}
+	}
 }
 
 func NewProc(dir string) *Proc {
@@ -114,6 +163,8 @@ func (p *Proc) Start(javaPath string, memMB int, jarName string) error {
 	p.stdin = stdin
 	p.exited = make(chan struct{})
 	p.startedAt = time.Now()
+	p.pid = cmd.Process.Pid
+	p.stopRequested = false
 	p.setStateLocked(StateStarting)
 	p.appendLineLocked(fmt.Sprintf("[craftpanel] Starting server (java %s)", strings.Join(args, " ")))
 
@@ -127,7 +178,6 @@ func (p *Proc) Start(javaPath string, memMB int, jarName string) error {
 		readers.Wait()
 		err := cmd.Wait()
 		p.mu.Lock()
-		defer p.mu.Unlock()
 		msg := "[craftpanel] Server process exited"
 		if err != nil {
 			msg = fmt.Sprintf("[craftpanel] Server process exited: %v", err)
@@ -135,8 +185,16 @@ func (p *Proc) Start(javaPath string, memMB int, jarName string) error {
 		p.appendLineLocked(msg)
 		p.cmd = nil
 		p.stdin = nil
+		p.pid = 0
+		crashed := !p.stopRequested
+		uptime := time.Since(p.startedAt)
+		hook := p.exitHook
 		p.setStateLocked(StateStopped)
 		close(exited)
+		p.mu.Unlock()
+		if hook != nil {
+			hook(crashed, uptime)
+		}
 	}()
 	return nil
 }
@@ -207,6 +265,7 @@ func (p *Proc) Stop() error {
 		<-exited
 		return nil
 	}
+	p.stopRequested = true
 	p.setStateLocked(StateStopping)
 	p.appendLineLocked("[craftpanel] Stopping server")
 	if p.stdin != nil {
@@ -235,6 +294,7 @@ func (p *Proc) Kill() error {
 		p.mu.Unlock()
 		return nil
 	}
+	p.stopRequested = true
 	cmd := p.cmd
 	exited := p.exited
 	p.appendLineLocked("[craftpanel] Killing server process")

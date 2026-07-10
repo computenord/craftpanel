@@ -39,6 +39,10 @@ type Handler struct {
 	javaMu      sync.Mutex
 	javaInfo    javaInfo
 	javaFetched time.Time
+
+	updMu  sync.Mutex
+	updTag string
+	updAt  time.Time
 }
 
 type javaInfo struct {
@@ -91,6 +95,23 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("POST /api/servers/{id}/eula", h.setEULA)
 	mux.HandleFunc("GET /api/servers/{id}/properties", h.getProperties)
 	mux.HandleFunc("PUT /api/servers/{id}/properties", h.setProperties)
+
+	mux.HandleFunc("GET /api/settings", h.getSettings)
+	mux.HandleFunc("PUT /api/settings", h.putSettings)
+	mux.HandleFunc("POST /api/account/totp/init", h.totpInit)
+	mux.HandleFunc("POST /api/account/totp/enable", h.totpEnable)
+	mux.HandleFunc("POST /api/account/totp/disable", h.totpDisable)
+
+	mux.HandleFunc("GET /api/servers/{id}/backups", h.backupList)
+	mux.HandleFunc("POST /api/servers/{id}/backups", h.backupCreate)
+	mux.HandleFunc("POST /api/servers/{id}/backups/restore", h.backupRestore)
+	mux.HandleFunc("DELETE /api/servers/{id}/backups", h.backupDelete)
+	mux.HandleFunc("GET /api/servers/{id}/backups/download", h.backupDownload)
+	mux.HandleFunc("POST /api/servers/{id}/upgrade", h.upgrade)
+	mux.HandleFunc("GET /api/servers/{id}/access", h.accessInfo)
+	mux.HandleFunc("POST /api/servers/{id}/access/{list}", h.accessAdd)
+	mux.HandleFunc("DELETE /api/servers/{id}/access/{list}", h.accessRemove)
+	mux.HandleFunc("PUT /api/servers/{id}/access/whitelist-mode", h.whitelistMode)
 
 	mux.HandleFunc("GET /api/servers/{id}/files", h.filesList)
 	mux.HandleFunc("GET /api/servers/{id}/file", h.fileGet)

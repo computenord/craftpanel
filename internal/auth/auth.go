@@ -41,14 +41,17 @@ var (
 	ErrRateLimited        = errors.New("too many attempts")
 	ErrUserExists         = errors.New("user already exists")
 	ErrUserNotFound       = errors.New("user not found")
+	ErrTOTPRequired       = errors.New("two-factor code required")
+	ErrInvalidTOTP        = errors.New("invalid two-factor code")
 
 	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_.-]{3,32}$`)
 )
 
 type User struct {
-	Username  string    `json:"username"`
-	Hash      string    `json:"hash"`
-	CreatedAt time.Time `json:"createdAt"`
+	Username   string    `json:"username"`
+	Hash       string    `json:"hash"`
+	TOTPSecret string    `json:"totpSecret,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 type Session struct {
@@ -61,23 +64,27 @@ type Session struct {
 var hashSem = make(chan struct{}, 2)
 
 type Store struct {
-	mu        sync.Mutex
-	usersPath string
-	sessPath  string
-	users     []User
-	usersMod  time.Time
-	usersSize int64
-	sessions  map[string]Session // key: hex(sha256(raw token))
-	dummyHash string
-	fails     map[string][]time.Time
+	mu          sync.Mutex
+	usersPath   string
+	sessPath    string
+	users       []User
+	usersMod    time.Time
+	usersSize   int64
+	sessions    map[string]Session // key: hex(sha256(raw token))
+	dummyHash   string
+	fails       map[string][]time.Time
+	pendingTOTP map[string]string // username -> secret awaiting confirmation
+	lastTOTP    map[string]int64  // username -> last accepted time step
 }
 
 func NewStore(dataDir string) (*Store, error) {
 	s := &Store{
-		usersPath: filepath.Join(dataDir, "users.json"),
-		sessPath:  filepath.Join(dataDir, "sessions.json"),
-		sessions:  map[string]Session{},
-		fails:     map[string][]time.Time{},
+		usersPath:   filepath.Join(dataDir, "users.json"),
+		sessPath:    filepath.Join(dataDir, "sessions.json"),
+		sessions:    map[string]Session{},
+		fails:       map[string][]time.Time{},
+		pendingTOTP: map[string]string{},
+		lastTOTP:    map[string]int64{},
 	}
 	if err := fsutil.ReadJSON(s.usersPath, &s.users); err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -203,8 +210,9 @@ func (s *Store) SetPassword(username, password string) error {
 	return ErrUserNotFound
 }
 
-// Authenticate verifies credentials, applying a per-IP rate limit.
-func (s *Store) Authenticate(ip, username, password string) error {
+// Authenticate verifies credentials and, when the account has two-factor auth
+// enabled, the TOTP code. A per-IP rate limit covers both factors.
+func (s *Store) Authenticate(ip, username, password, code string) error {
 	s.mu.Lock()
 	if !s.allowAttemptLocked(ip) {
 		s.mu.Unlock()
@@ -215,11 +223,12 @@ func (s *Store) Authenticate(ip, username, password string) error {
 	// a failure, and the limit never bites. A success clears the bucket again.
 	s.fails[ip] = append(s.fails[ip], time.Now())
 	s.reloadUsersLocked()
-	var hash string
+	var hash, secret string
 	found := false
 	for _, u := range s.users {
 		if u.Username == username {
 			hash = u.Hash
+			secret = u.TOTPSecret
 			found = true
 			break
 		}
@@ -236,8 +245,19 @@ func (s *Store) Authenticate(ip, username, password string) error {
 	if !ok {
 		return ErrInvalidCredentials
 	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if secret != "" {
+		if strings.TrimSpace(code) == "" {
+			return ErrTOTPRequired
+		}
+		step, valid := validateTOTP(secret, code, time.Now(), s.lastTOTP[username])
+		if !valid {
+			return ErrInvalidTOTP
+		}
+		s.lastTOTP[username] = step
+	}
 	delete(s.fails, ip)
 	return nil
 }

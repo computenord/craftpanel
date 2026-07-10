@@ -56,14 +56,21 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		Code     string `json:"code"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	err := h.Auth.Authenticate(h.clientIP(r), req.Username, req.Password)
+	err := h.Auth.Authenticate(h.clientIP(r), req.Username, req.Password, req.Code)
 	switch {
 	case errors.Is(err, auth.ErrRateLimited):
 		apiError(w, http.StatusTooManyRequests, "rate_limited", "too many failed attempts, try again later")
+		return
+	case errors.Is(err, auth.ErrTOTPRequired):
+		apiError(w, http.StatusUnauthorized, "totp_required", "two-factor code required")
+		return
+	case errors.Is(err, auth.ErrInvalidTOTP):
+		apiError(w, http.StatusUnauthorized, "totp_invalid", "wrong two-factor code")
 		return
 	case err != nil:
 		apiError(w, http.StatusUnauthorized, "invalid_credentials", "wrong username or password")
@@ -93,15 +100,21 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	username, _ := h.Auth.ValidateSession(cookie.Value)
-	writeJSON(w, http.StatusOK, map[string]string{"username": username})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"username": username,
+		"totp":     h.Auth.TOTPEnabled(username),
+	})
 }
 
 func (h *Handler) system(w http.ResponseWriter, r *http.Request) {
+	latest, available := h.updateInfo()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version": h.Version,
-		"os":      runtime.GOOS,
-		"arch":    runtime.GOARCH,
-		"java":    h.javaVersion(),
+		"version":         h.Version,
+		"os":              runtime.GOOS,
+		"arch":            runtime.GOARCH,
+		"java":            h.javaVersion(),
+		"latest":          latest,
+		"updateAvailable": available,
 	})
 }
 

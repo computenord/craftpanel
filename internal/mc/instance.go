@@ -53,16 +53,26 @@ type Instance struct {
 	// JavaMajor is the Java version this Minecraft release requires, as
 	// declared by Mojang. 0 means unknown, in which case no check is enforced.
 	JavaMajor int `json:"javaMajor,omitempty"`
+
+	RestartOnCrash bool   `json:"restartOnCrash"`
+	BackupAuto     bool   `json:"backupAuto"`
+	BackupTime     string `json:"backupTime,omitempty"` // "04:00"
+	BackupKeep     int    `json:"backupKeep,omitempty"`
 }
 
 // ServerView is what the API returns: config plus runtime state.
 type ServerView struct {
 	Instance
-	Status   string  `json:"status"`
-	Progress float64 `json:"progress"`
-	Error    string  `json:"error,omitempty"`
-	UptimeS  int64   `json:"uptimeS"`
-	EULA     bool    `json:"eula"`
+	Status     string      `json:"status"`
+	Progress   float64     `json:"progress"`
+	Error      string      `json:"error,omitempty"`
+	UptimeS    int64       `json:"uptimeS"`
+	EULA       bool        `json:"eula"`
+	Players    *PingResult `json:"players,omitempty"`
+	CPUPct     float64     `json:"cpuPct"`
+	RSSMB      int         `json:"rssMB"`
+	DiskMB     int64       `json:"diskMB"`
+	BackupBusy bool        `json:"backupBusy,omitempty"`
 }
 
 // Server couples persisted config with its supervisor process and install state.
@@ -76,14 +86,30 @@ type Server struct {
 	installProgress float64
 	installErr      string
 	deleting        bool
+
+	backupBusy     bool
+	lastAutoBackup string
+	crashCount     int
+	restartTimer   *time.Timer
+
+	cpuPrev  cpuSample
+	diskMB   int64
+	diskAt   time.Time
+	diskBusy bool
+	lastPing *PingResult
+	pingAt   time.Time
+	pingBusy bool
 }
 
 // Manager owns all server instances below <dataDir>/servers.
 type Manager struct {
-	mu       sync.Mutex
-	root     string // <dataDir>/servers
-	items    map[string]*Server
-	versions *Versions
+	mu           sync.Mutex
+	root         string // <dataDir>/servers
+	dataDir      string
+	settingsPath string
+	settings     PanelSettings
+	items        map[string]*Server
+	versions     *Versions
 }
 
 func NewManager(dataDir string, versions *Versions) (*Manager, error) {
@@ -91,7 +117,16 @@ func NewManager(dataDir string, versions *Versions) (*Manager, error) {
 	if err := os.MkdirAll(root, 0o750); err != nil {
 		return nil, err
 	}
-	m := &Manager{root: root, items: map[string]*Server{}, versions: versions}
+	m := &Manager{
+		root:         root,
+		dataDir:      dataDir,
+		settingsPath: filepath.Join(dataDir, "config.json"),
+		items:        map[string]*Server{},
+		versions:     versions,
+	}
+	if err := fsutil.ReadJSON(m.settingsPath, &m.settings); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
 
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -112,9 +147,60 @@ func NewManager(dataDir string, versions *Versions) (*Manager, error) {
 			srv.installing = false
 			srv.installErr = "server jar missing, retry the installation"
 		}
+		m.attachHooks(srv)
 		m.items[meta.ID] = srv
 	}
+	go m.runBackupScheduler()
 	return m, nil
+}
+
+// attachHooks wires the process exit event to the crash restart logic.
+func (m *Manager) attachHooks(srv *Server) {
+	srv.proc.SetExitHook(func(crashed bool, uptime time.Duration) {
+		m.onServerExit(srv, crashed, uptime)
+	})
+}
+
+func (m *Manager) onServerExit(srv *Server, crashed bool, uptime time.Duration) {
+	srv.mu.Lock()
+	if !crashed {
+		srv.crashCount = 0
+		srv.mu.Unlock()
+		return
+	}
+	if srv.deleting || !srv.meta.RestartOnCrash {
+		srv.mu.Unlock()
+		return
+	}
+	// A long healthy run resets the backoff.
+	if uptime > 5*time.Minute {
+		srv.crashCount = 0
+	}
+	srv.crashCount++
+	shift := srv.crashCount - 1
+	if shift > 6 {
+		shift = 6
+	}
+	delay := time.Duration(5<<uint(shift)) * time.Second
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	attempt := srv.crashCount
+	srv.restartTimer = time.AfterFunc(delay, func() {
+		if err := srv.start(); err != nil {
+			srv.proc.Note("Automatic restart failed: " + err.Error())
+		}
+	})
+	srv.mu.Unlock()
+	srv.proc.Note(fmt.Sprintf("Server crashed, restarting in %s (attempt %d)", delay, attempt))
+}
+
+// cancelRestartLocked stops a pending crash restart. Callers hold srv.mu.
+func (s *Server) cancelRestartLocked() {
+	if s.restartTimer != nil {
+		s.restartTimer.Stop()
+		s.restartTimer = nil
+	}
 }
 
 // DataDir returns the working directory (world, configs) of a server.
@@ -141,7 +227,61 @@ func (s *Server) view() ServerView {
 		v.UptimeS = int64(s.proc.Uptime().Seconds())
 	}
 	v.EULA = s.eulaAccepted()
+	v.BackupBusy = s.backupBusy
+
+	if v.Status == StateRunning || v.Status == StateStarting {
+		cpu, rss, next := procUsage(s.proc.PID(), s.cpuPrev)
+		s.cpuPrev = next
+		v.CPUPct = float64(int(cpu*10)) / 10
+		v.RSSMB = rss
+	} else {
+		s.cpuPrev = cpuSample{}
+	}
+	if v.Status == StateRunning {
+		v.Players = s.cachedPingLocked()
+	}
+	v.DiskMB = s.cachedDiskLocked()
 	return v
+}
+
+// cachedPingLocked returns the last server list ping result and refreshes it
+// in the background when stale. Never blocks the API.
+func (s *Server) cachedPingLocked() *PingResult {
+	if time.Since(s.pingAt) > 10*time.Second && !s.pingBusy {
+		s.pingBusy = true
+		port := s.meta.Port
+		go func() {
+			res, err := PingStatus(port, 2*time.Second)
+			s.mu.Lock()
+			if err != nil {
+				s.lastPing = nil
+			} else {
+				s.lastPing = res
+			}
+			s.pingAt = time.Now()
+			s.pingBusy = false
+			s.mu.Unlock()
+		}()
+	}
+	return s.lastPing
+}
+
+// cachedDiskLocked returns the server directory size, refreshed at most once
+// a minute in the background.
+func (s *Server) cachedDiskLocked() int64 {
+	if time.Since(s.diskAt) > time.Minute && !s.diskBusy {
+		s.diskBusy = true
+		dir := s.dir
+		go func() {
+			size := dirSizeMB(dir)
+			s.mu.Lock()
+			s.diskMB = size
+			s.diskAt = time.Now()
+			s.diskBusy = false
+			s.mu.Unlock()
+		}()
+	}
+	return s.diskMB
 }
 
 func (s *Server) eulaAccepted() bool {
@@ -266,8 +406,9 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 	}
 
 	srv := &Server{meta: meta, dir: dir, proc: NewProc(dataDir), installing: true}
+	m.attachHooks(srv)
 	m.items[id] = srv
-	go m.runInstall(srv)
+	go m.runInstall(srv, meta.Version)
 	return srv.view(), nil
 }
 
@@ -293,14 +434,46 @@ func (m *Manager) RetryInstall(id string) error {
 	srv.installing = true
 	srv.installErr = ""
 	srv.installProgress = 0
+	version := srv.meta.Version
 	srv.mu.Unlock()
-	go m.runInstall(srv)
+	go m.runInstall(srv, version)
 	return nil
 }
 
-func (m *Manager) runInstall(srv *Server) {
+// Upgrade downloads a different Minecraft version for an existing server. The
+// world is kept; meta is only updated once the new jar is verified on disk.
+func (m *Manager) Upgrade(id, version string) error {
+	srv, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return errors.New("version is required")
+	}
 	srv.mu.Lock()
-	typ, version := srv.meta.Type, srv.meta.Version
+	if srv.installing {
+		srv.mu.Unlock()
+		return errors.New("installation already in progress")
+	}
+	if srv.deleting || srv.backupBusy || srv.proc.State() != StateStopped {
+		srv.mu.Unlock()
+		return ErrNotStopped
+	}
+	srv.installing = true
+	srv.installErr = ""
+	srv.installProgress = 0
+	srv.mu.Unlock()
+	go m.runInstall(srv, version)
+	return nil
+}
+
+// runInstall downloads the server jar for targetVersion and, on success,
+// persists the (possibly changed) version and its Java requirement.
+func (m *Manager) runInstall(srv *Server, targetVersion string) {
+	srv.mu.Lock()
+	typ := srv.meta.Type
+	version := targetVersion
 	srv.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -336,10 +509,18 @@ func (m *Manager) runInstall(srv *Server) {
 	}
 	srv.installErr = ""
 	srv.installProgress = 1
+	changed := false
+	if srv.meta.Version != version {
+		srv.meta.Version = version
+		changed = true
+	}
 	if javaMajor > 0 && srv.meta.JavaMajor != javaMajor {
 		srv.meta.JavaMajor = javaMajor
+		changed = true
+	}
+	if changed {
 		if werr := fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta); werr != nil {
-			log.Printf("install %s: persist java requirement: %v", srv.meta.ID, werr)
+			log.Printf("install %s: persist meta: %v", srv.meta.ID, werr)
 		}
 	}
 	log.Printf("install %s: downloaded %s %s (needs java %d)", srv.meta.ID, typ, version, javaMajor)
@@ -356,12 +537,13 @@ func (m *Manager) Delete(id string) error {
 		return ErrNotFound
 	}
 	srv.mu.Lock()
-	if srv.installing || srv.deleting || srv.proc.State() != StateStopped {
+	if srv.installing || srv.deleting || srv.backupBusy || srv.proc.State() != StateStopped {
 		srv.mu.Unlock()
 		m.mu.Unlock()
 		return ErrNotStopped
 	}
 	srv.deleting = true
+	srv.cancelRestartLocked()
 	srv.mu.Unlock()
 	delete(m.items, id)
 	m.mu.Unlock()
@@ -379,11 +561,17 @@ func (m *Manager) Delete(id string) error {
 }
 
 type UpdateRequest struct {
-	Name      *string `json:"name"`
-	MemoryMB  *int    `json:"memoryMB"`
-	JavaPath  *string `json:"javaPath"`
-	Autostart *bool   `json:"autostart"`
+	Name           *string `json:"name"`
+	MemoryMB       *int    `json:"memoryMB"`
+	JavaPath       *string `json:"javaPath"`
+	Autostart      *bool   `json:"autostart"`
+	RestartOnCrash *bool   `json:"restartOnCrash"`
+	BackupAuto     *bool   `json:"backupAuto"`
+	BackupTime     *string `json:"backupTime"`
+	BackupKeep     *int    `json:"backupKeep"`
 }
+
+var backupTimeRe = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
 
 func (m *Manager) Update(id string, req UpdateRequest) (ServerView, error) {
 	srv, err := m.get(id)
@@ -412,6 +600,27 @@ func (m *Manager) Update(id string, req UpdateRequest) (ServerView, error) {
 	if req.Autostart != nil {
 		srv.meta.Autostart = *req.Autostart
 	}
+	if req.RestartOnCrash != nil {
+		srv.meta.RestartOnCrash = *req.RestartOnCrash
+	}
+	if req.BackupAuto != nil {
+		srv.meta.BackupAuto = *req.BackupAuto
+	}
+	if req.BackupTime != nil {
+		bt := strings.TrimSpace(*req.BackupTime)
+		if bt != "" && !backupTimeRe.MatchString(bt) {
+			srv.mu.Unlock()
+			return ServerView{}, errors.New("backup time must be HH:MM")
+		}
+		srv.meta.BackupTime = bt
+	}
+	if req.BackupKeep != nil {
+		if *req.BackupKeep < 1 || *req.BackupKeep > 365 {
+			srv.mu.Unlock()
+			return ServerView{}, errors.New("backup keep count must be between 1 and 365")
+		}
+		srv.meta.BackupKeep = *req.BackupKeep
+	}
 	err = fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta)
 	srv.mu.Unlock()
 	if err != nil {
@@ -433,8 +642,12 @@ func (m *Manager) Start(id string) error {
 func (s *Server) start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.cancelRestartLocked()
 	if s.deleting {
 		return ErrNotFound
+	}
+	if s.backupBusy {
+		return errors.New("a backup or restore is running")
 	}
 	if s.installing {
 		return errors.New("installation is still in progress")
@@ -480,6 +693,10 @@ func (m *Manager) Stop(id string) error {
 	if err != nil {
 		return err
 	}
+	srv.mu.Lock()
+	srv.cancelRestartLocked()
+	srv.crashCount = 0
+	srv.mu.Unlock()
 	return srv.proc.Stop()
 }
 
@@ -488,6 +705,10 @@ func (m *Manager) Kill(id string) error {
 	if err != nil {
 		return err
 	}
+	srv.mu.Lock()
+	srv.cancelRestartLocked()
+	srv.crashCount = 0
+	srv.mu.Unlock()
 	return srv.proc.Kill()
 }
 
