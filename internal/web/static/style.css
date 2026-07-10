@@ -63,7 +63,22 @@ a:hover { text-decoration: underline; }
 
 /* ---------- layout ---------- */
 
-.shell { max-width: 1080px; margin: 0 auto; padding: 0 20px 80px; }
+/* Sticky footer: the shell spans at least the viewport, the main area takes up
+   the slack, so the footer sits at the bottom even on a nearly empty page. */
+.shell {
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 20px 24px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.shell > main {
+  flex: 1 0 auto;
+  padding-bottom: 60px;
+}
 
 .topbar {
   display: flex;
@@ -592,7 +607,8 @@ input[type="checkbox"] { accent-color: var(--brand-bright); width: 15px; height:
 .toast.ok { border-left-color: var(--ok); }
 
 .foot {
-  margin-top: 60px;
+  margin-top: auto;
+  flex: none;
   padding-top: 18px;
   border-top: 1px solid var(--line);
   color: var(--faint);
