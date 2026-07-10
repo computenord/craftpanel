@@ -140,15 +140,19 @@ func runServe(dataDir, addr string, trustProxy bool) error {
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
 
-	stopCtx, cancelStop := context.WithTimeout(context.Background(), 35*time.Second)
-	defer cancelStop()
-	manager.StopAll(stopCtx)
 	if restartRequested.Load() {
-		// Non-zero exit so both Restart=always and Restart=on-failure units
-		// bring the new binary up.
+		// Self update: leave the Minecraft servers running. The new panel
+		// instance adopts them via their persisted run state. Non-zero exit so
+		// both Restart=always and Restart=on-failure units bring the new
+		// binary up.
+		manager.DetachAll()
 		log.Printf("restarting into the updated binary")
 		os.Exit(1)
 	}
+
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancelStop()
+	manager.StopAll(stopCtx)
 	log.Printf("bye")
 	return nil
 }

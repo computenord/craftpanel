@@ -227,7 +227,7 @@ const STRINGS = {
     "update.dismiss": "Hide",
     "update.now": "Update now",
     "update.updating": "Updating the panel",
-    "update.waiting": "Running servers are being stopped cleanly, the panel restarts and this page reloads by itself. This can take a minute.",
+    "update.waiting": "The panel restarts and this page reloads by itself. Minecraft servers keep running during the update.",
     "error.no_update": "The panel is already up to date.",
     "error.self_update_unsupported": "This install cannot update itself yet. Run the install command from the README once, it refreshes the service configuration.",
 
@@ -480,7 +480,7 @@ const STRINGS = {
     "update.dismiss": "Ausblenden",
     "update.now": "Jetzt aktualisieren",
     "update.updating": "Panel wird aktualisiert",
-    "update.waiting": "Laufende Server werden sauber gestoppt, das Panel startet neu und diese Seite lädt sich von selbst neu. Das kann eine Minute dauern.",
+    "update.waiting": "Das Panel startet neu und diese Seite lädt sich von selbst neu. Minecraft-Server laufen während des Updates weiter.",
     "error.no_update": "Das Panel ist bereits aktuell.",
     "error.self_update_unsupported": "Diese Installation kann sich noch nicht selbst aktualisieren. Führe einmal den Install-Befehl aus der README aus, er erneuert auch die Dienst-Konfiguration.",
 

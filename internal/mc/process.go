@@ -1,12 +1,13 @@
 package mc
 
 import (
-	"bufio"
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +21,14 @@ const (
 
 	ringSize        = 2000
 	stopGracePeriod = 30 * time.Second
+
+	// Panel-owned control files, kept in the server dir next to server.json so
+	// they are invisible to the file manager jail and excluded from backups.
+	runFile     = "run.json"
+	consoleLog  = "console.log"
+	consoleFifo = "console.in"
+
+	maxConsoleLog = 64 << 20
 )
 
 // Event is what console subscribers receive: either a log line or a state
@@ -30,25 +39,56 @@ type Event struct {
 	Status string `json:"status,omitempty"`
 }
 
-// Proc supervises a single Minecraft server process: lifecycle, stdin
-// commands and a console ring buffer with live subscribers.
+// Proc supervises a single Minecraft server process. On Linux the process
+// writes its console to a log file and reads commands from a FIFO, so a
+// restarted panel (self update, crash) can reattach to a still running
+// server. On Windows (development only) classic pipes are used.
 type Proc struct {
 	mu            sync.Mutex
-	dir           string
+	ctlDir        string // server dir holding run.json / console files
+	dir           string // working directory of the server process
 	state         string
-	cmd           *exec.Cmd
-	stdin         io.WriteCloser
-	exited        chan struct{}
-	startedAt     time.Time
 	pid           int
+	startedAt     time.Time
 	stopRequested bool
-	exitHook      func(crashed bool, uptime time.Duration)
 	readyMarker   string
+	exited        chan struct{}
+	exitHook      func(crashed bool, uptime time.Duration)
+
+	cmd      *exec.Cmd // set when this panel started the process itself
+	stdin    io.WriteCloser
+	tailStop chan struct{}
+	tailDone chan struct{}
 
 	ring      []string
 	ringNext  int
 	ringCount int
 	subs      map[chan Event]struct{}
+}
+
+func NewProc(ctlDir, dataDir string) *Proc {
+	return &Proc{
+		ctlDir: ctlDir,
+		dir:    dataDir,
+		state:  StateStopped,
+		ring:   make([]string, ringSize),
+		subs:   map[chan Event]struct{}{},
+	}
+}
+
+func (p *Proc) State() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state
+}
+
+func (p *Proc) Uptime() time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.state == StateStopped || p.startedAt.IsZero() {
+		return 0
+	}
+	return time.Since(p.startedAt)
 }
 
 // SetExitHook registers a callback fired whenever the process exits. crashed
@@ -59,7 +99,7 @@ func (p *Proc) SetExitHook(hook func(crashed bool, uptime time.Duration)) {
 	p.exitHook = hook
 }
 
-// PID returns the java process id, or 0 when nothing is running.
+// PID returns the server process id, or 0 when nothing is running.
 func (p *Proc) PID() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -97,138 +137,6 @@ func (p *Proc) WaitForLine(substr string, timeout time.Duration) bool {
 	}
 }
 
-func NewProc(dir string) *Proc {
-	return &Proc{
-		dir:   dir,
-		state: StateStopped,
-		ring:  make([]string, ringSize),
-		subs:  map[chan Event]struct{}{},
-	}
-}
-
-func (p *Proc) State() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.state
-}
-
-func (p *Proc) Uptime() time.Duration {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.state == StateStopped || p.startedAt.IsZero() {
-		return 0
-	}
-	return time.Since(p.startedAt)
-}
-
-// Start launches the server process. readyMarker is the console substring
-// that signals the server finished booting.
-func (p *Proc) Start(bin string, args, extraEnv []string, readyMarker string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.state != StateStopped {
-		return fmt.Errorf("server is %s", p.state)
-	}
-
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = p.dir
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
-	p.readyMarker = readyMarker
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return err
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return err
-	}
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start java: %w", err)
-	}
-
-	p.cmd = cmd
-	p.stdin = stdin
-	p.exited = make(chan struct{})
-	p.startedAt = time.Now()
-	p.pid = cmd.Process.Pid
-	p.stopRequested = false
-	p.setStateLocked(StateStarting)
-	p.appendLineLocked(fmt.Sprintf("[craftpanel] Starting server (%s %s)", bin, strings.Join(args, " ")))
-
-	var readers sync.WaitGroup
-	readers.Add(2)
-	go p.readLoop(stdout, &readers)
-	go p.readLoop(stderr, &readers)
-
-	exited := p.exited
-	go func() {
-		readers.Wait()
-		err := cmd.Wait()
-		p.mu.Lock()
-		msg := "[craftpanel] Server process exited"
-		if err != nil {
-			msg = fmt.Sprintf("[craftpanel] Server process exited: %v", err)
-		}
-		p.appendLineLocked(msg)
-		p.cmd = nil
-		p.stdin = nil
-		p.pid = 0
-		crashed := !p.stopRequested
-		uptime := time.Since(p.startedAt)
-		hook := p.exitHook
-		p.setStateLocked(StateStopped)
-		close(exited)
-		p.mu.Unlock()
-		if hook != nil {
-			hook(crashed, uptime)
-		}
-	}()
-	return nil
-}
-
-// readLoop drains one of the child's output pipes. It must never stop early:
-// an abandoned pipe fills its kernel buffer and blocks the Minecraft server
-// forever. Overlong lines are therefore truncated, not treated as an error.
-func (p *Proc) readLoop(r io.Reader, wg *sync.WaitGroup) {
-	defer wg.Done()
-	const maxLine = 1 << 20
-	br := bufio.NewReaderSize(r, 64<<10)
-	var buf []byte
-	emit := func() {
-		line := string(buf)
-		buf = buf[:0]
-		p.mu.Lock()
-		p.appendLineLocked(line)
-		if p.state == StateStarting && p.readyMarker != "" && strings.Contains(line, p.readyMarker) {
-			p.setStateLocked(StateRunning)
-		}
-		p.mu.Unlock()
-	}
-	for {
-		chunk, isPrefix, err := br.ReadLine()
-		if len(chunk) > 0 && len(buf) < maxLine {
-			buf = append(buf, chunk...)
-		}
-		if err != nil {
-			if len(buf) > 0 {
-				emit()
-			}
-			return
-		}
-		if isPrefix {
-			continue
-		}
-		emit()
-	}
-}
-
 // SendCommand writes a single command line to the server console.
 func (p *Proc) SendCommand(command string) error {
 	command = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(command, "\r", " "), "\n", " "))
@@ -239,6 +147,9 @@ func (p *Proc) SendCommand(command string) error {
 	defer p.mu.Unlock()
 	if p.state != StateRunning && p.state != StateStarting {
 		return errors.New("server is not running")
+	}
+	if p.stdin == nil {
+		return errors.New("console input is not attached, restart the server")
 	}
 	p.appendLineLocked("> " + command)
 	_, err := io.WriteString(p.stdin, command+"\n")
@@ -266,16 +177,13 @@ func (p *Proc) Stop() error {
 		_, _ = io.WriteString(p.stdin, "stop\n")
 	}
 	exited := p.exited
-	cmd := p.cmd
 	p.mu.Unlock()
 
 	select {
 	case <-exited:
 		return nil
 	case <-time.After(stopGracePeriod):
-		if cmd != nil && cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		p.killProcess()
 		<-exited
 		return nil
 	}
@@ -289,13 +197,10 @@ func (p *Proc) Kill() error {
 		return nil
 	}
 	p.stopRequested = true
-	cmd := p.cmd
 	exited := p.exited
 	p.appendLineLocked("[craftpanel] Killing server process")
 	p.mu.Unlock()
-	if cmd != nil && cmd.Process != nil {
-		_ = cmd.Process.Kill()
-	}
+	p.killProcess()
 	<-exited
 	return nil
 }
@@ -330,6 +235,16 @@ func (p *Proc) historyLocked() []string {
 	return out
 }
 
+// emitLine feeds one console line into the ring buffer and checks readiness.
+func (p *Proc) emitLine(line string) {
+	p.mu.Lock()
+	p.appendLineLocked(line)
+	if p.state == StateStarting && p.readyMarker != "" && strings.Contains(line, p.readyMarker) {
+		p.setStateLocked(StateRunning)
+	}
+	p.mu.Unlock()
+}
+
 func (p *Proc) appendLineLocked(line string) {
 	p.ring[p.ringNext] = line
 	p.ringNext = (p.ringNext + 1) % ringSize
@@ -352,4 +267,107 @@ func (p *Proc) broadcastLocked(ev Event) {
 			// Slow subscriber: drop the event rather than blocking the server.
 		}
 	}
+}
+
+// finish is the single exit path for both owned and adopted processes.
+func (p *Proc) finish(exitMsg string) {
+	if p.tailStop != nil {
+		close(p.tailStop)
+		<-p.tailDone
+	}
+	p.mu.Lock()
+	os.Remove(filepath.Join(p.ctlDir, runFile))
+	if p.stdin != nil {
+		p.stdin.Close()
+		p.stdin = nil
+	}
+	p.tailStop = nil
+	p.tailDone = nil
+	p.appendLineLocked(exitMsg)
+	p.cmd = nil
+	p.pid = 0
+	crashed := !p.stopRequested
+	uptime := time.Since(p.startedAt)
+	hook := p.exitHook
+	p.setStateLocked(StateStopped)
+	close(p.exited)
+	p.mu.Unlock()
+	if hook != nil {
+		hook(crashed, uptime)
+	}
+}
+
+func (p *Proc) startTailLocked(path string, offset int64) {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	p.tailStop = stop
+	p.tailDone = done
+	go p.tailLoop(path, offset, stop, done)
+}
+
+// tailLoop follows the server's console log file, surviving truncation and
+// rotating it when it grows too large.
+func (p *Proc) tailLoop(path string, offset int64, stop, done chan struct{}) {
+	defer close(done)
+	f, err := os.Open(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	if offset > 0 {
+		f.Seek(offset, io.SeekStart)
+	}
+	buf := make([]byte, 32<<10)
+	var partial []byte
+
+	read := func() bool {
+		n, _ := f.Read(buf)
+		if n <= 0 {
+			return false
+		}
+		data := buf[:n]
+		for {
+			i := bytes.IndexByte(data, '\n')
+			if i < 0 {
+				break
+			}
+			line := string(append(partial, data[:i]...))
+			partial = partial[:0]
+			p.emitLine(strings.TrimRight(line, "\r"))
+			data = data[i+1:]
+		}
+		partial = append(partial, data...)
+		return true
+	}
+
+	for {
+		if read() {
+			continue
+		}
+		select {
+		case <-stop:
+			read() // final drain after process exit
+			if len(partial) > 0 {
+				p.emitLine(strings.TrimRight(string(partial), "\r"))
+			}
+			return
+		case <-time.After(250 * time.Millisecond):
+		}
+		if fi, err := f.Stat(); err == nil {
+			if cur, _ := f.Seek(0, io.SeekCurrent); cur > fi.Size() {
+				// File was truncated behind our back, start over.
+				f.Seek(0, io.SeekStart)
+				partial = partial[:0]
+			} else if fi.Size() > maxConsoleLog {
+				os.Truncate(path, 0)
+				f.Seek(0, io.SeekStart)
+				partial = partial[:0]
+				p.Note("Console log rotated")
+			}
+		}
+	}
+}
+
+func startCommandLine(bin string, args []string) string {
+	return fmt.Sprintf("[craftpanel] Starting server (%s %s)", bin, strings.Join(args, " "))
 }

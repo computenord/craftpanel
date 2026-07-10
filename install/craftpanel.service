@@ -13,9 +13,10 @@ ExecStart=/usr/local/bin/craftpanel -data /var/lib/craftpanel -addr :8420
 Restart=always
 RestartSec=3
 
-# Only signal the panel itself on stop. It shuts its Minecraft servers down
-# gracefully (world save) and exits; systemd kills leftovers after the timeout.
-KillMode=mixed
+# Only ever signal the panel itself. On systemctl stop it shuts its Minecraft
+# servers down gracefully; during self updates it exits without touching them
+# and the new panel instance reattaches to the running servers.
+KillMode=process
 TimeoutStopSec=90
 
 # Hardening. MemoryDenyWriteExecute stays off because the Java JIT needs it.

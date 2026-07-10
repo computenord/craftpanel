@@ -143,16 +143,35 @@ func NewManager(dataDir string, versions *Versions) (*Manager, error) {
 			log.Printf("skipping %s: %v", dir, err)
 			continue
 		}
-		srv := &Server{meta: meta, dir: dir, proc: NewProc(filepath.Join(dir, dataSubdir))}
+		srv := &Server{meta: meta, dir: dir, proc: NewProc(dir, filepath.Join(dir, dataSubdir))}
 		if !srv.binaryExists() {
 			srv.installing = false
 			srv.installErr = "server files missing, retry the installation"
 		}
 		m.attachHooks(srv)
+		// A previous panel instance (self update, crash) may have left this
+		// server running; pick it back up instead of reporting it stopped.
+		if srv.proc.TryAdopt() {
+			log.Printf("reattached to running server %s (pid %d)", meta.ID, srv.proc.PID())
+		}
 		m.items[meta.ID] = srv
 	}
 	go m.runBackupScheduler()
 	return m, nil
+}
+
+// DetachAll leaves running servers alive across a panel restart. Their run
+// state is already persisted on disk, the next panel instance adopts them.
+func (m *Manager) DetachAll() {
+	for _, v := range m.List() {
+		if v.Status != StateRunning && v.Status != StateStarting {
+			continue
+		}
+		if srv, err := m.get(v.ID); err == nil {
+			srv.proc.Note("Panel is restarting for an update, the server keeps running")
+		}
+		log.Printf("detaching %s, server keeps running", v.ID)
+	}
 }
 
 // attachHooks wires the process exit event to the crash restart logic.
@@ -424,7 +443,7 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 		return ServerView{}, err
 	}
 
-	srv := &Server{meta: meta, dir: dir, proc: NewProc(dataDir), installing: true}
+	srv := &Server{meta: meta, dir: dir, proc: NewProc(dir, dataDir), installing: true}
 	m.attachHooks(srv)
 	m.items[id] = srv
 	go m.runInstall(srv, meta.Version)
@@ -915,9 +934,10 @@ func (m *Manager) SetProperties(id string, set map[string]string) error {
 }
 
 // StartAutostarts starts all servers marked autostart (used on panel boot).
+// Servers adopted from a previous panel instance are already running.
 func (m *Manager) StartAutostarts() {
 	for _, v := range m.List() {
-		if !v.Autostart {
+		if !v.Autostart || v.Status != StateStopped {
 			continue
 		}
 		if err := m.Start(v.ID); err != nil {
