@@ -1345,7 +1345,7 @@ async function renderSettingsTab(id, s) {
   });
 
   loadAccess(id);
-  loadProperties(id);
+  loadProperties(id, s.type);
 }
 
 /* ---------- whitelist and ops ---------- */
@@ -1528,7 +1528,41 @@ function renderEulaState(id, accepted) {
   });
 }
 
-async function loadProperties(id) {
+/* Curated server.properties fields with friendly inputs. Everything not in
+   this schema lives in the collapsible advanced table below. */
+const PROP_SCHEMA = {
+  java: [
+    { key: "motd", type: "text" },
+    { key: "max-players", type: "number", min: 1, max: 1000, def: "20" },
+    { key: "gamemode", type: "select", options: ["survival", "creative", "adventure", "spectator"], def: "survival" },
+    { key: "difficulty", type: "select", options: ["peaceful", "easy", "normal", "hard"], def: "easy" },
+    { key: "hardcore", type: "bool", def: "false" },
+    { key: "pvp", type: "bool", def: "true" },
+    { key: "online-mode", type: "bool", def: "true" },
+    { key: "level-seed", type: "text" },
+    { key: "view-distance", type: "number", min: 3, max: 32, def: "10" },
+    { key: "simulation-distance", type: "number", min: 3, max: 32, def: "10" },
+    { key: "spawn-protection", type: "number", min: 0, max: 1000, def: "16" },
+    { key: "allow-flight", type: "bool", def: "false" },
+    { key: "enable-command-block", type: "bool", def: "false" },
+    { key: "player-idle-timeout", type: "number", min: 0, max: 1440, def: "0" }
+  ],
+  bedrock: [
+    { key: "server-name", type: "text" },
+    { key: "max-players", type: "number", min: 1, max: 1000, def: "10" },
+    { key: "gamemode", type: "select", options: ["survival", "creative", "adventure"], def: "survival" },
+    { key: "difficulty", type: "select", options: ["peaceful", "easy", "normal", "hard"], def: "easy" },
+    { key: "allow-cheats", type: "bool", def: "false" },
+    { key: "online-mode", type: "bool", def: "true" },
+    { key: "level-seed", type: "text" },
+    { key: "view-distance", type: "number", min: 5, max: 96, def: "32" },
+    { key: "player-idle-timeout", type: "number", min: 0, max: 1440, def: "30" },
+    { key: "default-player-permission-level", type: "select", options: ["visitor", "member", "operator"], def: "member" },
+    { key: "texturepack-required", type: "bool", def: "false" }
+  ]
+};
+
+async function loadProperties(id, type) {
   const host = document.getElementById("props-body");
   if (!host) return;
   let props;
@@ -1539,9 +1573,74 @@ async function loadProperties(id) {
     toastError(e);
     return;
   }
+  const cur = {};
+  for (const p of props) cur[p.key] = p.value;
+  const schema = PROP_SCHEMA[type === "bedrock" ? "bedrock" : "java"];
+  const curatedKeys = new Set(schema.map((f) => f.key));
+
   host.innerHTML = "";
-  const table = el(`<table class="kv-table"><tbody></tbody></table>`);
-  const tbody = table.querySelector("tbody");
+  const grid = el(`<div class="props-grid"></div>`);
+  host.appendChild(grid);
+
+  // Each getter reports [key, currentValue, changedSinceLoad].
+  const getters = [];
+  for (const f of schema) {
+    const inFile = Object.prototype.hasOwnProperty.call(cur, f.key);
+    const orig = inFile ? cur[f.key] : (f.def !== undefined ? f.def : "");
+    const label = t("prop." + f.key + ".label");
+    const desc = t("prop." + f.key + ".desc");
+    let cell, read;
+
+    if (f.type === "bool") {
+      cell = el(`<div class="prop-field">
+        <label class="check"><input type="checkbox"><span>${esc(label)}</span></label>
+        <p class="prop-desc">${esc(desc)}</p>
+      </div>`);
+      const input = cell.querySelector("input");
+      input.checked = orig === "true";
+      read = () => (input.checked ? "true" : "false");
+    } else if (f.type === "select") {
+      const opts = [...f.options];
+      if (orig !== "" && !opts.includes(orig)) opts.unshift(orig);
+      cell = el(`<div class="prop-field">
+        <label class="field"><span>${esc(label)}</span>
+          <select>${opts.map((o) =>
+            `<option value="${esc(o)}" ${o === orig ? "selected" : ""}>${esc(STRINGS.en["opt." + o] ? t("opt." + o) : o)}</option>`).join("")}</select>
+        </label>
+        <p class="prop-desc">${esc(desc)}</p>
+      </div>`);
+      const input = cell.querySelector("select");
+      read = () => input.value;
+    } else {
+      const typeAttr = f.type === "number"
+        ? `type="number" ${f.min !== undefined ? `min="${f.min}"` : ""} ${f.max !== undefined ? `max="${f.max}"` : ""}`
+        : `type="text"`;
+      cell = el(`<div class="prop-field">
+        <label class="field"><span>${esc(label)}</span><input ${typeAttr}></label>
+        <p class="prop-desc">${esc(desc)}</p>
+      </div>`);
+      const input = cell.querySelector("input");
+      input.value = orig;
+      read = () => input.value.trim();
+    }
+    grid.appendChild(cell);
+    getters.push(() => {
+      const val = read();
+      // Only write keys the user actually changed, so defaults for keys that
+      // are not in the file yet do not get persisted unasked.
+      return [f.key, val, val !== orig || (inFile && val !== cur[f.key])];
+    });
+  }
+
+  // Advanced: raw view of everything else in the file.
+  const advEntries = props.filter((p) => !curatedKeys.has(p.key));
+  const adv = el(`<details class="adv">
+    <summary>${t("props.advanced")} (${advEntries.length})</summary>
+    <p class="hint">${t("props.advancedHint")}</p>
+    <table class="kv-table"><tbody></tbody></table>
+    <button type="button" class="btn btn-ghost btn-sm" id="prop-add">${ICONS.plus}</button>
+  </details>`);
+  const tbody = adv.querySelector("tbody");
   const addRow = (key, value, keyEditable) => {
     const tr = el(`<tr>
       <td><input type="text" class="pk" ${keyEditable ? "" : "readonly"}></td>
@@ -1551,18 +1650,20 @@ async function loadProperties(id) {
     tr.querySelector(".pv").value = value;
     tbody.appendChild(tr);
   };
-  for (const p of props) addRow(p.key, p.value, false);
-  if (props.length === 0) host.appendChild(el(`<p class="hint">${t("props.empty")}</p>`));
-  host.appendChild(table);
+  for (const p of advEntries) addRow(p.key, p.value, false);
+  adv.querySelector("#prop-add").addEventListener("click", () => addRow("", "", true));
+  host.appendChild(adv);
 
   const bar = el(`<div class="modal-actions">
-    <button class="btn btn-ghost btn-sm" id="prop-add">${ICONS.plus}</button>
     <button class="btn btn-primary" id="props-save">${t("props.save")}</button>
   </div>`);
   host.appendChild(bar);
-  bar.querySelector("#prop-add").addEventListener("click", () => addRow("", "", true));
   bar.querySelector("#props-save").addEventListener("click", async () => {
     const set = {};
+    for (const get of getters) {
+      const [key, val, changed] = get();
+      if (changed && val !== "") set[key] = val;
+    }
     tbody.querySelectorAll("tr").forEach((tr) => {
       const k = tr.querySelector(".pk").value.trim();
       const v = tr.querySelector(".pv").value;
@@ -1572,7 +1673,7 @@ async function loadProperties(id) {
     try {
       await api(`/api/servers/${encodeURIComponent(id)}/properties`, { method: "PUT", body: set });
       toast(t("props.saved"), "ok");
-      loadProperties(id);
+      loadProperties(id, type);
     } catch (e) { toastError(e); }
   });
 }

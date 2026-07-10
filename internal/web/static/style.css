@@ -484,6 +484,33 @@ input[type="checkbox"] { accent-color: var(--brand-bright); width: 15px; height:
 .form-row { display: flex; gap: 12px; }
 .form-row > * { flex: 1; }
 
+.props-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 6px 24px;
+  margin-bottom: 14px;
+}
+.prop-field label.field, .prop-field label.check { margin-bottom: 4px; }
+.prop-desc {
+  color: var(--faint);
+  font-size: 12px;
+  line-height: 1.45;
+  margin: 0 0 12px;
+}
+
+details.adv { margin-top: 6px; }
+details.adv summary {
+  cursor: pointer;
+  color: var(--muted);
+  font: 600 13px var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 8px 0;
+  user-select: none;
+}
+details.adv summary:hover { color: var(--text); }
+details.adv .kv-table { margin-bottom: 8px; }
+
 .kv-table { width: 100%; border-collapse: collapse; }
 .kv-table td { padding: 4px 6px 4px 0; }
 .kv-table td:first-child { width: 38%; }
