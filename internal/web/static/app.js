@@ -690,6 +690,7 @@ async function renderDetail(id, tab) {
     <div id="detail-head"></div>
     <nav class="tabs" id="tabs">
       <button data-tab="console">${t("tabs.console")}</button>
+      <button data-tab="players">${t("tabs.players")}</button>
       <button data-tab="files">${t("tabs.files")}</button>
       <button data-tab="backups">${t("tabs.backups")}</button>
       <button data-tab="settings">${t("tabs.settings")}</button>
@@ -703,6 +704,7 @@ async function renderDetail(id, tab) {
     });
   });
   if (tab === "files") renderFilesTab(id);
+  else if (tab === "players") renderPlayersTab(id);
   else if (tab === "backups") renderBackupsTab(id);
   else if (tab === "settings") renderSettingsTab(id, s);
   else renderConsoleTab(id, s);
@@ -1105,6 +1107,146 @@ async function openEditor(id, path, size) {
       loadFiles(id);
     } catch (e) { toastError(e); }
   });
+}
+
+/* ---------- players tab ---------- */
+
+// reasonModal asks for confirmation plus an optional reason. Resolves to
+// null on cancel, or {reason} on confirm.
+function reasonModal(text) {
+  return new Promise((resolve) => {
+    const box = el(`<div>
+      <p>${esc(text)}</p>
+      <label class="field"><span>${t("players.reason")}</span>
+        <input type="text" id="rm-reason" maxlength="100"></label>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="rm-cancel">${t("misc.cancel")}</button>
+        <button class="btn btn-danger" id="rm-ok">OK</button>
+      </div>
+    </div>`);
+    openModal(box);
+    box.querySelector("#rm-reason").focus();
+    const done = (v) => { closeModal(); resolve(v); };
+    box.querySelector("#rm-cancel").addEventListener("click", () => done(null));
+    box.querySelector("#rm-ok").addEventListener("click", () =>
+      done({ reason: box.querySelector("#rm-reason").value.trim() }));
+  });
+}
+
+async function playerAction(id, action, name, reason) {
+  try {
+    await api(`/api/servers/${encodeURIComponent(id)}/players/action`, {
+      method: "POST",
+      body: { action, name, reason: reason || "" }
+    });
+    toast(t("players.done"), "ok");
+    setTimeout(() => loadPlayers(id), 900);
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+function renderPlayersTab(id) {
+  const body = document.getElementById("tab-body");
+  body.innerHTML = `
+    <div class="panel">
+      <h2>${t("players.online")}</h2>
+      <div id="pl-online">${t("misc.loading")}</div>
+    </div>
+    <div class="panel" id="pl-banned-panel" hidden>
+      <h2>${t("players.banned")}</h2>
+      <div id="pl-banned"></div>
+    </div>`;
+  loadPlayers(id);
+  stopTabTimer();
+  tabTimer = setInterval(() => loadPlayers(id), 8000);
+}
+
+async function loadPlayers(id) {
+  const host = document.getElementById("pl-online");
+  if (!host) return;
+  let info;
+  try {
+    info = await api(`/api/servers/${encodeURIComponent(id)}/players`);
+  } catch (e) {
+    if (e.status !== 401) toastError(e);
+    return;
+  }
+
+  if (!info.running) {
+    host.innerHTML = `<p class="hint">${t("players.notRunning")}</p>`;
+  } else if (info.online.length === 0) {
+    host.innerHTML = `<p class="hint">${t("players.none")}${info.max ? ` (0/${info.max})` : ""}</p>`;
+  } else {
+    host.innerHTML = `<p class="hint">${info.online.length}/${info.max || "?"}</p><ul class="plist" id="pl-list"></ul>
+      ${info.bedrock ? `<p class="hint">${t("players.bedrockHint")}</p>` : ""}`;
+    const ul = host.querySelector("#pl-list");
+    for (const pl of info.online) {
+      const li = el(`<li>
+        <span class="pname">${esc(pl.name)}${pl.op ? ` <span class="badge st-running"><i class="led"></i>OP</span>` : ""}</span>
+        <span class="pacts"></span>
+      </li>`);
+      const acts = li.querySelector(".pacts");
+      const btn = (label, cls, fn) => {
+        const b = el(`<button class="btn btn-sm ${cls}">${label}</button>`);
+        b.addEventListener("click", fn);
+        acts.appendChild(b);
+      };
+      if (pl.op) {
+        btn(t("players.deop"), "", async () => {
+          if (await confirmModal(t("players.confirmDeop", { name: pl.name }), false)) {
+            playerAction(id, "deop", pl.name);
+          }
+        });
+      } else {
+        btn(t("players.op"), "", async () => {
+          if (await confirmModal(t("players.confirmOp", { name: pl.name }), false)) {
+            playerAction(id, "op", pl.name);
+          }
+        });
+      }
+      btn(t("players.kick"), "", async () => {
+        const res = await reasonModal(t("players.confirmKick", { name: pl.name }));
+        if (res) playerAction(id, "kick", pl.name, res.reason);
+      });
+      if (!info.bedrock) {
+        btn(t("players.ban"), "btn-danger", async () => {
+          const res = await reasonModal(t("players.confirmBan", { name: pl.name }));
+          if (res) playerAction(id, "ban", pl.name, res.reason);
+        });
+      }
+      ul.appendChild(li);
+    }
+  }
+
+  const bannedPanel = document.getElementById("pl-banned-panel");
+  const bannedHost = document.getElementById("pl-banned");
+  if (!bannedPanel || !bannedHost) return;
+  if (info.bedrock) {
+    bannedPanel.hidden = true;
+    return;
+  }
+  bannedPanel.hidden = false;
+  if (info.banned.length === 0) {
+    bannedHost.innerHTML = `<p class="hint">${t("players.noBanned")}</p>`;
+    return;
+  }
+  bannedHost.innerHTML = `<ul class="plist" id="pl-ban-list"></ul>`;
+  const ul = bannedHost.querySelector("#pl-ban-list");
+  for (const b of info.banned) {
+    const li = el(`<li>
+      <span class="pname">${esc(b.name)}${b.reason ? ` <span class="pban-reason">${esc(b.reason)}</span>` : ""}</span>
+      <span class="pacts"></span>
+    </li>`);
+    const un = el(`<button class="btn btn-sm">${t("players.pardon")}</button>`);
+    un.addEventListener("click", async () => {
+      if (await confirmModal(t("players.confirmPardon", { name: b.name }), false)) {
+        playerAction(id, "pardon", b.name);
+      }
+    });
+    li.querySelector(".pacts").appendChild(un);
+    ul.appendChild(li);
+  }
 }
 
 /* ---------- backups tab ---------- */

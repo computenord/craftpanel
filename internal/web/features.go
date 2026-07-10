@@ -178,6 +178,39 @@ func (h *Handler) upgrade(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
 
+/* ---------- live players ---------- */
+
+func (h *Handler) playersList(w http.ResponseWriter, r *http.Request) {
+	info, err := h.Manager.OnlinePlayers(r.PathValue("id"))
+	if err != nil {
+		managerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (h *Handler) playerAction(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string `json:"action"`
+		Name   string `json:"name"`
+		Reason string `json:"reason"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	err := h.Manager.PlayerAction(r.PathValue("id"), req.Action, req.Name, req.Reason)
+	switch {
+	case errors.Is(err, mc.ErrActionUnsupported):
+		apiError(w, http.StatusBadRequest, "action_unsupported", "this action is not available for this server type")
+	case errors.Is(err, mc.ErrBadPlayerName):
+		apiError(w, http.StatusBadRequest, "bad_name", "invalid player name")
+	case err != nil:
+		managerError(w, err)
+	default:
+		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	}
+}
+
 /* ---------- whitelist and ops ---------- */
 
 func validAccessList(list string) bool {

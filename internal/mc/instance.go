@@ -100,6 +100,9 @@ type Server struct {
 	lastPing *PingResult
 	pingAt   time.Time
 	pingBusy bool
+
+	players   *PlayersInfo
+	playersAt time.Time
 }
 
 // Manager owns all server instances below <dataDir>/servers.

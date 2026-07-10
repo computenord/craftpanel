@@ -46,7 +46,7 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 **Backups.** One click creates a consistent zip of the whole server (world saving is paused around the copy), scheduled daily backups with retention, restore and download from the browser, and a configurable backup directory so the zips can land on a mounted disk or NFS share. Note for the hardened systemd unit: an external backup path must be added to `ReadWritePaths` via `systemctl edit craftpanel`.
 
-**Player management.** Whitelist and OPs are managed in the UI. Names are validated against Mojang and get their real UUID; offline-mode servers get correct offline UUIDs instead. The dashboard shows who is online via the server list ping, plus RAM, CPU and disk usage per server.
+**Player management.** A live player view shows who is online right now, with kick, ban and OP controls behind explicit confirmation prompts. Whitelist and OPs are managed in the UI. Names are validated against Mojang and get their real UUID; offline-mode servers get correct offline UUIDs instead. The dashboard shows who is online via the server list ping, plus RAM, CPU and disk usage per server.
 
 **Keeps servers alive.** Optional automatic restart after a crash, with exponential backoff so a broken server does not flap. Version upgrades keep the world: pick a new Minecraft version and the panel swaps the jar, only committing after a verified download.
 

@@ -137,8 +137,19 @@ func (p *Proc) WaitForLine(substr string, timeout time.Duration) bool {
 	}
 }
 
-// SendCommand writes a single command line to the server console.
+// SendCommand writes a single command line to the server console and echoes
+// it into the console history.
 func (p *Proc) SendCommand(command string) error {
+	return p.send(command, true)
+}
+
+// SendCommandQuiet writes a command without echoing it, for internal queries
+// like the periodic player list.
+func (p *Proc) SendCommandQuiet(command string) error {
+	return p.send(command, false)
+}
+
+func (p *Proc) send(command string, echo bool) error {
 	command = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(command, "\r", " "), "\n", " "))
 	if command == "" {
 		return errors.New("empty command")
@@ -151,7 +162,9 @@ func (p *Proc) SendCommand(command string) error {
 	if p.stdin == nil {
 		return errors.New("console input is not attached, restart the server")
 	}
-	p.appendLineLocked("> " + command)
+	if echo {
+		p.appendLineLocked("> " + command)
+	}
 	_, err := io.WriteString(p.stdin, command+"\n")
 	return err
 }
