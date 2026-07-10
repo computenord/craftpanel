@@ -282,6 +282,8 @@ Craftpanel deliberately does a few things well rather than everything badly. It 
 
 ## License and trademarks
 
+Craftpanel is released under the [MIT License](LICENSE).
+
 Minecraft is a trademark of Mojang Synergies AB. This project is not affiliated with Mojang or Microsoft, and accepting the Minecraft EULA remains the decision of each server operator.
 
 ---
