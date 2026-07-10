@@ -74,6 +74,27 @@ go build -o craftpanel .       # local build
 
 Releases are plain binaries named `craftpanel-linux-amd64` and `craftpanel-linux-arm64`, attached to GitHub releases. The installer downloads exactly these names.
 
+## Testing a build before publishing a release
+
+The panel binary is self-contained, so you can run it straight from a shell on any Linux box:
+
+```bash
+scp dist/craftpanel-linux-amd64 test-host:/tmp/craftpanel
+ssh test-host '/tmp/craftpanel -addr :8420 -data ~/craftpanel-test'
+```
+
+To exercise the installer itself (service user, systemd unit, hardening, Java detection) without a published release, serve the binary over HTTP and point `CRAFTPANEL_URL` at it:
+
+```bash
+# on your machine, inside dist/
+python3 -m http.server 8000
+
+# on the test host, with install.sh copied over
+sudo CRAFTPANEL_URL=http://YOUR-IP:8000/craftpanel-linux-amd64 bash install.sh
+```
+
+Afterwards `sudo bash install.sh --uninstall` removes the service and binary again, keeping `/var/lib/craftpanel`.
+
 ## License and trademarks
 
 Minecraft is a trademark of Mojang Synergies AB. This project is not affiliated with Mojang or Microsoft. Accepting the Minecraft EULA is a decision of each server operator.

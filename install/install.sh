@@ -11,6 +11,9 @@
 #   CRAFTPANEL_REPO      GitHub repo to download from (default: computenord/craftpanel)
 #   CRAFTPANEL_VERSION   Release tag (default: latest)
 #   CRAFTPANEL_PORT      Panel port (default: 8420)
+#   CRAFTPANEL_URL       Download the binary from this URL instead of a GitHub
+#                        release. Useful to test a build before publishing:
+#                          sudo CRAFTPANEL_URL=http://192.168.1.5:8000/craftpanel-linux-amd64 bash install.sh
 set -euo pipefail
 
 REPO="${CRAFTPANEL_REPO:-computenord/craftpanel}"
@@ -42,13 +45,17 @@ case "$(uname -m)" in
   *) fail "Unsupported architecture: $(uname -m)" ;;
 esac
 
-if [ "$VERSION" = "latest" ]; then
+if [ -n "${CRAFTPANEL_URL:-}" ]; then
+  URL="$CRAFTPANEL_URL"
+  say "Downloading craftpanel from $URL"
+elif [ "$VERSION" = "latest" ]; then
   URL="https://github.com/$REPO/releases/latest/download/craftpanel-linux-$ARCH"
+  say "Downloading craftpanel ($ARCH) from $REPO ($VERSION)"
 else
   URL="https://github.com/$REPO/releases/download/$VERSION/craftpanel-linux-$ARCH"
+  say "Downloading craftpanel ($ARCH) from $REPO ($VERSION)"
 fi
 
-say "Downloading craftpanel ($ARCH) from $REPO ($VERSION)"
 TMP=$(mktemp)
 trap 'rm -f "$TMP"' EXIT
 curl -fSL --progress-bar -o "$TMP" "$URL" || fail "Download failed: $URL"
