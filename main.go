@@ -5,6 +5,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -22,6 +24,7 @@ import (
 	"github.com/computenord/craftpanel/internal/agent"
 	"github.com/computenord/craftpanel/internal/auth"
 	"github.com/computenord/craftpanel/internal/mc"
+	"github.com/computenord/craftpanel/internal/selfupdate"
 	"github.com/computenord/craftpanel/internal/web"
 )
 
@@ -111,14 +114,35 @@ func runServe(dataDir, addr string, trustProxy, managed bool) error {
 
 	// Managed hosting mode: start the control-plane agent if the VM was
 	// provisioned for it (agent.json present). Nil when self-hosted.
-	var lockState func() string
+	var lockState, ssoKey func() string
 	if managed {
-		ag, err := agent.Load(dataDir, manager, version, nil)
+		// The customer signs in via SSO, never with a local password. Seed a
+		// single admin account on first boot so sessions have an identity.
+		if authStore.NeedsSetup() {
+			pw := make([]byte, 24)
+			rand.Read(pw)
+			if err := authStore.CreateFirstUser("owner", hex.EncodeToString(pw)); err != nil {
+				log.Printf("managed: create owner account: %v", err)
+			} else {
+				log.Printf("managed: seeded owner account (sign in happens via SSO)")
+			}
+		}
+		updateFn := func(v string) error {
+			uctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			if err := selfupdate.Apply(uctx, v); err != nil {
+				return err
+			}
+			requestRestart()
+			return nil
+		}
+		ag, err := agent.Load(dataDir, manager, version, updateFn)
 		if err != nil {
 			return fmt.Errorf("load agent: %w", err)
 		}
 		if ag != nil {
 			lockState = ag.Lock
+			ssoKey = ag.SSOPublicKey
 			go ag.Run(ctx)
 		} else {
 			log.Printf("managed mode requested but no agent.json found, running unmanaged")
@@ -127,7 +151,7 @@ func runServe(dataDir, addr string, trustProxy, managed bool) error {
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           web.New(authStore, manager, versions, version, trustProxy, requestRestart, lockState),
+		Handler:           web.New(authStore, manager, versions, version, trustProxy, requestRestart, lockState, ssoKey),
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,

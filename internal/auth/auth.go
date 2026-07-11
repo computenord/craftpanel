@@ -137,6 +137,18 @@ func (s *Store) NeedsSetup() bool {
 	return len(s.users) == 0
 }
 
+// FirstUsername returns the admin account name, or "" when none exists. Used
+// by the managed-mode SSO jump, which logs in as the single panel admin.
+func (s *Store) FirstUsername() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reloadUsersLocked()
+	if len(s.users) == 0 {
+		return ""
+	}
+	return s.users[0].Username
+}
+
 func (s *Store) CreateUser(username, password string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -41,6 +41,9 @@ type Handler struct {
 	// LockState reports the managed-mode lock level (none|grace|locked|
 	// suspended). Nil when the panel is self-hosted.
 	LockState func() string
+	// SSOKey returns the pinned control-plane Ed25519 public key (PEM) for
+	// verifying single-sign-on jumps. Nil when self-hosted.
+	SSOKey func() string
 
 	javaMu      sync.Mutex
 	javaInfo    javaInfo
@@ -57,8 +60,8 @@ type javaInfo struct {
 	Major   int    `json:"major,omitempty"`
 }
 
-func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool, restart func(), lockState func() string) http.Handler {
-	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy, Restart: restart, LockState: lockState}
+func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool, restart func(), lockState func() string, ssoKey func() string) http.Handler {
+	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy, Restart: restart, LockState: lockState, SSOKey: ssoKey}
 
 	mux := http.NewServeMux()
 
@@ -67,6 +70,7 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 		panic(err)
 	}
 	mux.Handle("GET /assets/", http.StripPrefix("/assets/", http.FileServerFS(static)))
+	mux.HandleFunc("GET /sso", h.sso)
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		data, err := fs.ReadFile(static, "index.html")
 		if err != nil {
