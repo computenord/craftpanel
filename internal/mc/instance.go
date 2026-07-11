@@ -59,6 +59,8 @@ type Instance struct {
 	BackupAuto     bool   `json:"backupAuto"`
 	BackupTime     string `json:"backupTime,omitempty"` // "04:00"
 	BackupKeep     int    `json:"backupKeep,omitempty"`
+
+	Discord DiscordConfig `json:"discord"`
 }
 
 // ServerView is what the API returns: config plus runtime state.
@@ -103,6 +105,9 @@ type Server struct {
 
 	players   *PlayersInfo
 	playersAt time.Time
+
+	notifyCh  chan string
+	watchQuit chan struct{}
 }
 
 // Manager owns all server instances below <dataDir>/servers.
@@ -154,9 +159,12 @@ func NewManager(dataDir string, versions *Versions) (*Manager, error) {
 		m.attachHooks(srv)
 		// A previous panel instance (self update, crash) may have left this
 		// server running; pick it back up instead of reporting it stopped.
+		// The Discord watcher subscribes afterwards on purpose, so adoption
+		// does not fire a spurious "is online" notification.
 		if srv.proc.TryAdopt() {
 			log.Printf("reattached to running server %s (pid %d)", meta.ID, srv.proc.PID())
 		}
+		m.startWatch(srv)
 		m.items[meta.ID] = srv
 	}
 	go m.runBackupScheduler()
@@ -184,15 +192,28 @@ func (m *Manager) attachHooks(srv *Server) {
 	})
 }
 
+// startWatch launches the per-server notification goroutines.
+func (m *Manager) startWatch(srv *Server) {
+	srv.notifyCh = make(chan string, 64)
+	srv.watchQuit = make(chan struct{})
+	go m.runNotifier(srv)
+	go m.watchServer(srv)
+}
+
 func (m *Manager) onServerExit(srv *Server, crashed bool, uptime time.Duration) {
 	srv.mu.Lock()
 	if !crashed {
 		srv.crashCount = 0
 		srv.mu.Unlock()
+		m.notify(srv, notifyStatus, "stopped")
 		return
 	}
 	if srv.deleting || !srv.meta.RestartOnCrash {
+		deleting := srv.deleting
 		srv.mu.Unlock()
+		if !deleting {
+			m.notify(srv, notifyStatus, "crashed")
+		}
 		return
 	}
 	// A long healthy run resets the backoff.
@@ -216,6 +237,7 @@ func (m *Manager) onServerExit(srv *Server, crashed bool, uptime time.Duration) 
 	})
 	srv.mu.Unlock()
 	srv.proc.Note(fmt.Sprintf("Server crashed, restarting in %s (attempt %d)", delay, attempt))
+	m.notify(srv, notifyStatus, "crashRestart", delay.String(), attempt)
 }
 
 // cancelRestartLocked stops a pending crash restart. Callers hold srv.mu.
@@ -448,6 +470,7 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 
 	srv := &Server{meta: meta, dir: dir, proc: NewProc(dir, dataDir), installing: true}
 	m.attachHooks(srv)
+	m.startWatch(srv)
 	m.items[id] = srv
 	go m.runInstall(srv, meta.Version)
 	return srv.view(), nil
@@ -598,6 +621,9 @@ func (m *Manager) Delete(id string) error {
 	srv.mu.Unlock()
 	delete(m.items, id)
 	m.mu.Unlock()
+	if srv.watchQuit != nil {
+		close(srv.watchQuit)
+	}
 
 	if err := os.RemoveAll(srv.dir); err != nil {
 		m.mu.Lock()
@@ -612,14 +638,15 @@ func (m *Manager) Delete(id string) error {
 }
 
 type UpdateRequest struct {
-	Name           *string `json:"name"`
-	MemoryMB       *int    `json:"memoryMB"`
-	JavaPath       *string `json:"javaPath"`
-	Autostart      *bool   `json:"autostart"`
-	RestartOnCrash *bool   `json:"restartOnCrash"`
-	BackupAuto     *bool   `json:"backupAuto"`
-	BackupTime     *string `json:"backupTime"`
-	BackupKeep     *int    `json:"backupKeep"`
+	Name           *string        `json:"name"`
+	MemoryMB       *int           `json:"memoryMB"`
+	JavaPath       *string        `json:"javaPath"`
+	Autostart      *bool          `json:"autostart"`
+	RestartOnCrash *bool          `json:"restartOnCrash"`
+	BackupAuto     *bool          `json:"backupAuto"`
+	BackupTime     *string        `json:"backupTime"`
+	BackupKeep     *int           `json:"backupKeep"`
+	Discord        *DiscordConfig `json:"discord"`
 }
 
 var backupTimeRe = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
@@ -671,6 +698,18 @@ func (m *Manager) Update(id string, req UpdateRequest) (ServerView, error) {
 			return ServerView{}, errors.New("backup keep count must be between 1 and 365")
 		}
 		srv.meta.BackupKeep = *req.BackupKeep
+	}
+	if req.Discord != nil {
+		d := *req.Discord
+		d.Webhook = strings.TrimSpace(d.Webhook)
+		if d.Webhook != "" && !validDiscordWebhook(d.Webhook) {
+			srv.mu.Unlock()
+			return ServerView{}, errors.New("the webhook must be a discord.com webhook URL")
+		}
+		if d.Lang != "de" {
+			d.Lang = "en"
+		}
+		srv.meta.Discord = d
 	}
 	err = fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta)
 	srv.mu.Unlock()

@@ -178,6 +178,16 @@ func (h *Handler) upgrade(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, map[string]bool{"ok": true})
 }
 
+/* ---------- discord ---------- */
+
+func (h *Handler) discordTest(w http.ResponseWriter, r *http.Request) {
+	if err := h.Manager.DiscordTest(r.PathValue("id")); err != nil {
+		managerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
 /* ---------- live players ---------- */
 
 func (h *Handler) playersList(w http.ResponseWriter, r *http.Request) {

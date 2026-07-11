@@ -113,6 +113,7 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("DELETE /api/servers/{id}/backups", h.backupDelete)
 	mux.HandleFunc("GET /api/servers/{id}/backups/download", h.backupDownload)
 	mux.HandleFunc("POST /api/servers/{id}/upgrade", h.upgrade)
+	mux.HandleFunc("POST /api/servers/{id}/discord/test", h.discordTest)
 	mux.HandleFunc("GET /api/servers/{id}/players", h.playersList)
 	mux.HandleFunc("POST /api/servers/{id}/players/action", h.playerAction)
 	mux.HandleFunc("GET /api/servers/{id}/access", h.accessInfo)

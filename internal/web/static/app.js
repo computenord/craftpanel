@@ -1423,6 +1423,34 @@ async function renderSettingsTab(id, s) {
     </div>
 
     <div class="panel">
+      <h2>${t("discord.title")}</h2>
+      <p class="hint">${t("discord.hint")}</p>
+      <form id="dc-form">
+        <label class="field"><span>${t("discord.webhook")}</span>
+          <input type="text" name="webhook" value="${esc((s.discord && s.discord.webhook) || "")}" placeholder="https://discord.com/api/webhooks/..."></label>
+        <label class="field"><span>${t("discord.lang")}</span>
+          <select name="lang">
+            <option value="de" ${s.discord && s.discord.lang === "de" ? "selected" : ""}>Deutsch</option>
+            <option value="en" ${!s.discord || s.discord.lang !== "de" ? "selected" : ""}>English</option>
+          </select></label>
+        <label class="check"><input type="checkbox" name="status" ${s.discord && s.discord.status ? "checked" : ""}>
+          <span>${t("discord.status")}</span></label>
+        <label class="check"><input type="checkbox" name="backups" ${s.discord && s.discord.backups ? "checked" : ""}>
+          <span>${t("discord.backups")}</span></label>
+        <label class="check"><input type="checkbox" name="players" ${s.discord && s.discord.players ? "checked" : ""}>
+          <span>${t("discord.players")}</span></label>
+        ${s.type === "bedrock"
+          ? `<p class="hint">${t("discord.chatBedrock")}</p>`
+          : `<label class="check"><input type="checkbox" name="chat" ${s.discord && s.discord.chat ? "checked" : ""}>
+              <span>${t("discord.chat")}</span></label>`}
+        <div class="modal-actions">
+          <button type="button" class="btn" id="dc-test">${t("discord.test")}</button>
+          <button type="submit" class="btn btn-primary">${t("settings.save")}</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="panel">
       <h2>${t("props.title")}</h2>
       <p class="hint">${t("props.hint")}</p>
       <div id="props-body">${t("misc.loading")}</div>
@@ -1489,6 +1517,33 @@ async function renderSettingsTab(id, s) {
       toast(t("upgrade.started"), "ok");
       updateDetailHead(id);
     } catch (e) { toastError(e); }
+  });
+
+  const dcForm = body.querySelector("#dc-form");
+  dcForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/servers/" + encodeURIComponent(id), {
+        method: "PATCH",
+        body: {
+          discord: {
+            webhook: dcForm.webhook.value.trim(),
+            lang: dcForm.lang.value,
+            status: dcForm.status.checked,
+            backups: dcForm.backups.checked,
+            players: dcForm.players.checked,
+            chat: dcForm.chat ? dcForm.chat.checked : false
+          }
+        }
+      });
+      toast(t("settings.saved"), "ok");
+    } catch (err) { toastError(err); }
+  });
+  body.querySelector("#dc-test").addEventListener("click", async () => {
+    try {
+      await api(`/api/servers/${encodeURIComponent(id)}/discord/test`, { method: "POST", body: {} });
+      toast(t("discord.testOk"), "ok");
+    } catch (err) { toastError(err); }
   });
 
   loadAccess(id);

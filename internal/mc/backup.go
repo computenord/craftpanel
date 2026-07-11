@@ -126,15 +126,17 @@ func (m *Manager) StartBackup(id, kind string) error {
 	srv.mu.Unlock()
 
 	go func() {
-		err := m.doBackup(srv, kind)
+		name, size, err := m.doBackup(srv, kind)
 		srv.mu.Lock()
 		srv.backupBusy = false
 		srv.mu.Unlock()
 		if err != nil {
 			log.Printf("backup %s: %v", id, err)
 			srv.proc.Note("Backup failed: " + err.Error())
+			m.notify(srv, notifyBackup, "backupFail", err.Error())
 			return
 		}
+		m.notify(srv, notifyBackup, "backupOk", fmt.Sprintf("%s, %.1f MB", name, float64(size)/(1<<20)))
 		if kind == "auto" {
 			m.pruneAutoBackups(id, keep)
 		}
@@ -142,10 +144,10 @@ func (m *Manager) StartBackup(id, kind string) error {
 	return nil
 }
 
-func (m *Manager) doBackup(srv *Server, kind string) error {
+func (m *Manager) doBackup(srv *Server, kind string) (string, int64, error) {
 	dir := m.backupDirFor(srv.meta.ID)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return err
+		return "", 0, err
 	}
 	name := fmt.Sprintf("%s-%s.zip", kind, time.Now().Format("20060102-150405"))
 	dest := filepath.Join(dir, name)
@@ -170,11 +172,15 @@ func (m *Manager) doBackup(srv *Server, kind string) error {
 	}
 
 	if err := zipDir(srv.DataDir(), dest); err != nil {
-		return err
+		return "", 0, err
+	}
+	var size int64
+	if fi, err := os.Stat(dest); err == nil {
+		size = fi.Size()
 	}
 	log.Printf("backup %s: created %s", srv.meta.ID, name)
 	srv.proc.Note("Backup created: " + name)
-	return nil
+	return name, size, nil
 }
 
 func zipDir(src, dest string) error {

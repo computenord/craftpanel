@@ -52,6 +52,8 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 **The boring but necessary parts.** One click to accept the Minecraft EULA, a `server.properties` editor that preserves your comments and unknown keys, autostart on boot, a console with command history, filtering and log download, and a graceful shutdown that lets every world save before the process exits.
 
+**Discord notifications.** Give a server a webhook URL and pick what gets posted: status changes (online, stopped, crashed), backup results, players joining and leaving, and on Java servers a live mirror of the in-game chat. Messages are batched to stay clear of rate limits and sent with mentions disabled, so nobody can ping a channel from game chat.
+
 **Two-factor authentication.** TOTP works with every standard authenticator app.
 
 **Updates itself.** The panel checks for new releases and updates in place at the click of a button: checksum-verified download, clean server shutdown, automatic restart. The systemd unit grants the service write access to exactly one file outside its data directory, its own binary.
