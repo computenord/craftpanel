@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -473,6 +474,8 @@ func downloadVerified(ctx context.Context, url, destPath, algo, wantSum string, 
 		h = sha1.New()
 	case "sha256":
 		h = sha256.New()
+	case "sha512":
+		h = sha512.New()
 	case "":
 		// No checksum published upstream (Bedrock); TLS is the only integrity.
 	default:

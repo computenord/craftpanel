@@ -60,6 +60,10 @@ type Instance struct {
 	BackupTime     string `json:"backupTime,omitempty"` // "04:00"
 	BackupKeep     int    `json:"backupKeep,omitempty"`
 
+	RestartAuto bool   `json:"restartAuto"`
+	RestartTime string `json:"restartTime,omitempty"` // "04:00", time of the restart itself
+	RestartWarn int    `json:"restartWarn,omitempty"` // warning lead in minutes
+
 	Discord DiscordConfig `json:"discord"`
 }
 
@@ -90,10 +94,11 @@ type Server struct {
 	installErr      string
 	deleting        bool
 
-	backupBusy     bool
-	lastAutoBackup string
-	crashCount     int
-	restartTimer   *time.Timer
+	backupBusy      bool
+	lastAutoBackup  string
+	lastAutoRestart string
+	crashCount      int
+	restartTimer    *time.Timer
 
 	cpuPrev  cpuSample
 	diskMB   int64
@@ -167,7 +172,7 @@ func NewManager(dataDir string, versions *Versions) (*Manager, error) {
 		m.startWatch(srv)
 		m.items[meta.ID] = srv
 	}
-	go m.runBackupScheduler()
+	go m.runScheduler()
 	return m, nil
 }
 
@@ -646,6 +651,9 @@ type UpdateRequest struct {
 	BackupAuto     *bool          `json:"backupAuto"`
 	BackupTime     *string        `json:"backupTime"`
 	BackupKeep     *int           `json:"backupKeep"`
+	RestartAuto    *bool          `json:"restartAuto"`
+	RestartTime    *string        `json:"restartTime"`
+	RestartWarn    *int           `json:"restartWarn"`
 	Discord        *DiscordConfig `json:"discord"`
 }
 
@@ -698,6 +706,24 @@ func (m *Manager) Update(id string, req UpdateRequest) (ServerView, error) {
 			return ServerView{}, errors.New("backup keep count must be between 1 and 365")
 		}
 		srv.meta.BackupKeep = *req.BackupKeep
+	}
+	if req.RestartAuto != nil {
+		srv.meta.RestartAuto = *req.RestartAuto
+	}
+	if req.RestartTime != nil {
+		rt := strings.TrimSpace(*req.RestartTime)
+		if rt != "" && !backupTimeRe.MatchString(rt) {
+			srv.mu.Unlock()
+			return ServerView{}, errors.New("restart time must be HH:MM")
+		}
+		srv.meta.RestartTime = rt
+	}
+	if req.RestartWarn != nil {
+		if *req.RestartWarn < 0 || *req.RestartWarn > 60 {
+			srv.mu.Unlock()
+			return ServerView{}, errors.New("restart warning must be between 0 and 60 minutes")
+		}
+		srv.meta.RestartWarn = *req.RestartWarn
 	}
 	if req.Discord != nil {
 		d := *req.Discord

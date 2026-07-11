@@ -399,37 +399,3 @@ func (m *Manager) pruneAutoBackups(id string, keep int) {
 		}
 	}
 }
-
-// runBackupScheduler fires daily automatic backups at the configured time.
-func (m *Manager) runBackupScheduler() {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		hhmm := now.Format("15:04")
-		day := now.Format("20060102")
-
-		m.mu.Lock()
-		servers := make([]*Server, 0, len(m.items))
-		for _, s := range m.items {
-			servers = append(servers, s)
-		}
-		m.mu.Unlock()
-
-		for _, srv := range servers {
-			srv.mu.Lock()
-			due := srv.meta.BackupAuto && srv.meta.BackupTime == hhmm &&
-				srv.lastAutoBackup != day && !srv.backupBusy && !srv.installing && !srv.deleting
-			if due {
-				srv.lastAutoBackup = day
-			}
-			id := srv.meta.ID
-			srv.mu.Unlock()
-			if due {
-				if err := m.StartBackup(id, "auto"); err != nil {
-					log.Printf("auto backup %s: %v", id, err)
-				}
-			}
-		}
-	}
-}

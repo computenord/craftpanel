@@ -691,6 +691,7 @@ async function renderDetail(id, tab) {
     <nav class="tabs" id="tabs">
       <button data-tab="console">${t("tabs.console")}</button>
       <button data-tab="players">${t("tabs.players")}</button>
+      ${s.type === "paper" ? `<button data-tab="plugins">${t("tabs.plugins")}</button>` : ""}
       <button data-tab="files">${t("tabs.files")}</button>
       <button data-tab="backups">${t("tabs.backups")}</button>
       <button data-tab="settings">${t("tabs.settings")}</button>
@@ -705,6 +706,7 @@ async function renderDetail(id, tab) {
   });
   if (tab === "files") renderFilesTab(id);
   else if (tab === "players") renderPlayersTab(id);
+  else if (tab === "plugins" && s.type === "paper") renderPluginsTab(id);
   else if (tab === "backups") renderBackupsTab(id);
   else if (tab === "settings") renderSettingsTab(id, s);
   else renderConsoleTab(id, s);
@@ -1249,6 +1251,157 @@ async function loadPlayers(id) {
   }
 }
 
+/* ---------- plugins tab (paper) ---------- */
+
+function renderPluginsTab(id) {
+  const body = document.getElementById("tab-body");
+  body.innerHTML = `
+    <div class="panel">
+      <h2>${t("plugins.installed")}</h2>
+      <p class="hint">${t("plugins.hint")}</p>
+      <div class="files-bar">
+        <button class="btn btn-sm btn-primary" id="plg-upload">${ICONS.upload} ${t("plugins.upload")}</button>
+        <input type="file" id="plg-file" accept=".jar" multiple hidden>
+      </div>
+      <div id="plg-list">${t("misc.loading")}</div>
+    </div>
+    <div class="panel">
+      <h2>${t("plugins.search")}</h2>
+      <div class="add-row">
+        <input type="text" id="plg-query" placeholder="${esc(t("plugins.searchPlaceholder"))}">
+        <button class="btn btn-sm btn-primary" id="plg-go">${t("plugins.searchBtn")}</button>
+      </div>
+      <div id="plg-results"></div>
+    </div>`;
+
+  const fileInput = body.querySelector("#plg-file");
+  body.querySelector("#plg-upload").addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", async () => {
+    for (const file of fileInput.files) {
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(id)}/plugins/upload`,
+          { method: "POST", headers: { "X-Craftpanel": "1" }, body: fd });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw Object.assign(new Error(data.message || res.statusText), { code: data.error });
+        }
+        toast(t("files.uploaded") + ": " + file.name, "ok");
+      } catch (e) { toastError(e); }
+    }
+    fileInput.value = "";
+    loadPluginList(id);
+  });
+
+  const doSearch = async () => {
+    const q = body.querySelector("#plg-query").value.trim();
+    const host = body.querySelector("#plg-results");
+    if (!q) { host.innerHTML = ""; return; }
+    host.innerHTML = `<p class="hint">${t("misc.loading")}</p>`;
+    let hits;
+    try {
+      hits = await api(`/api/servers/${encodeURIComponent(id)}/plugins/search?q=${encodeURIComponent(q)}`);
+    } catch (e) { host.innerHTML = ""; toastError(e); return; }
+    if (hits.length === 0) {
+      host.innerHTML = `<p class="hint">${t("plugins.noResults")}</p>`;
+      return;
+    }
+    host.innerHTML = `<ul class="plist"></ul>`;
+    const ul = host.querySelector("ul");
+    for (const hit of hits) {
+      const li = el(`<li class="plg-hit">
+        <span class="pname"><b>${esc(hit.title)}</b><span class="plg-desc">${esc(hit.description)}</span>
+          <span class="plg-dl">${hit.downloads.toLocaleString()} ${t("plugins.downloads")}</span></span>
+        <span class="pacts"></span>
+      </li>`);
+      const btn = el(`<button class="btn btn-sm ${hit.installed ? "" : "btn-ok"}" ${hit.installed ? "disabled" : ""}>
+        ${hit.installed ? t("plugins.alreadyInstalled") : t("plugins.install")}</button>`);
+      if (!hit.installed) {
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          btn.textContent = t("misc.loading");
+          try {
+            const entry = await api(`/api/servers/${encodeURIComponent(id)}/plugins/install`,
+              { method: "POST", body: { projectId: hit.projectId } });
+            toast(t("plugins.installedOk", { name: entry.title, v: entry.version }), "ok");
+            btn.textContent = t("plugins.alreadyInstalled");
+            loadPluginList(id);
+          } catch (e) {
+            btn.disabled = false;
+            btn.textContent = t("plugins.install");
+            toastError(e);
+          }
+        });
+      }
+      li.querySelector(".pacts").appendChild(btn);
+      ul.appendChild(li);
+    }
+  };
+  body.querySelector("#plg-go").addEventListener("click", doSearch);
+  body.querySelector("#plg-query").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); doSearch(); }
+  });
+
+  loadPluginList(id);
+}
+
+async function loadPluginList(id) {
+  const host = document.getElementById("plg-list");
+  if (!host) return;
+  let list;
+  try {
+    list = await api(`/api/servers/${encodeURIComponent(id)}/plugins?check=1`);
+  } catch (e) {
+    host.textContent = "";
+    if (e.status !== 401) toastError(e);
+    return;
+  }
+  if (list.length === 0) {
+    host.innerHTML = `<p class="hint">${t("plugins.none")}</p>`;
+    return;
+  }
+  host.innerHTML = `<ul class="plist"></ul>`;
+  const ul = host.querySelector("ul");
+  for (const p of list) {
+    const label = p.title ? `<b>${esc(p.title)}</b> <span class="plg-desc">${esc(p.file)}</span>` : esc(p.file);
+    const li = el(`<li>
+      <span class="pname">${label}
+        ${p.version ? `<span class="badge">${esc(p.version)}</span>` : `<span class="plg-desc">${t("plugins.manual")}</span>`}
+        <span class="plg-dl">${fmtSize(p.size)}</span></span>
+      <span class="pacts"></span>
+    </li>`);
+    const acts = li.querySelector(".pacts");
+    if (p.updateAvailable) {
+      const up = el(`<button class="btn btn-sm btn-ok">${esc(t("plugins.update", { v: p.newVersion }))}</button>`);
+      up.addEventListener("click", async () => {
+        up.disabled = true;
+        up.textContent = t("misc.loading");
+        try {
+          await api(`/api/servers/${encodeURIComponent(id)}/plugins/install`,
+            { method: "POST", body: { projectId: p.projectId } });
+          toast(t("plugins.installedOk", { name: p.title, v: p.newVersion }), "ok");
+          loadPluginList(id);
+        } catch (e) {
+          up.disabled = false;
+          toastError(e);
+        }
+      });
+      acts.appendChild(up);
+    }
+    const del = el(`<button class="btn btn-sm btn-danger">${t("files.delete")}</button>`);
+    del.addEventListener("click", async () => {
+      if (!(await confirmModal(t("plugins.deleteConfirm", { name: p.title || p.file }), true))) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/plugins?file=${encodeURIComponent(p.file)}`, { method: "DELETE" });
+        loadPluginList(id);
+      } catch (e) { toastError(e); }
+    });
+    acts.appendChild(del);
+    ul.appendChild(li);
+  }
+}
+
 /* ---------- backups tab ---------- */
 
 async function renderBackupsTab(id) {
@@ -1408,6 +1561,23 @@ async function renderSettingsTab(id, s) {
     </div>
 
     <div class="panel">
+      <h2>${t("restart.title")}</h2>
+      <p class="hint">${t("restart.hint")}</p>
+      <form id="rs-form">
+        <label class="check"><input type="checkbox" name="restartAuto" ${s.restartAuto ? "checked" : ""}>
+          <span>${t("restart.enable")}</span></label>
+        <div class="form-row">
+          <label class="field"><span>${t("restart.time")}</span>
+            <input type="time" name="restartTime" value="${esc(s.restartTime || "04:00")}"></label>
+          <label class="field"><span>${t("restart.warn")}</span>
+            <input type="number" name="restartWarn" min="0" max="60" value="${s.restartWarn || 5}"></label>
+        </div>
+        <p class="hint">${t("restart.warnHint")}</p>
+        <button class="btn btn-primary" type="submit">${t("settings.save")}</button>
+      </form>
+    </div>
+
+    <div class="panel">
       <h2>${t("upgrade.title")}</h2>
       <p class="hint">${t("upgrade.hint")}</p>
       <div class="form-row">
@@ -1517,6 +1687,22 @@ async function renderSettingsTab(id, s) {
       toast(t("upgrade.started"), "ok");
       updateDetailHead(id);
     } catch (e) { toastError(e); }
+  });
+
+  const rsForm = body.querySelector("#rs-form");
+  rsForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/servers/" + encodeURIComponent(id), {
+        method: "PATCH",
+        body: {
+          restartAuto: rsForm.restartAuto.checked,
+          restartTime: rsForm.restartTime.value,
+          restartWarn: parseInt(rsForm.restartWarn.value, 10) || 0
+        }
+      });
+      toast(t("settings.saved"), "ok");
+    } catch (err) { toastError(err); }
   });
 
   const dcForm = body.querySelector("#dc-form");

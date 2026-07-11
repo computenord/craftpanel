@@ -48,7 +48,9 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 **Player management.** A live player view shows who is online right now, with kick, ban and OP controls behind explicit confirmation prompts. Whitelist and OPs are managed in the UI. Names are validated against Mojang and get their real UUID; offline-mode servers get correct offline UUIDs instead. The dashboard shows who is online via the server list ping, plus RAM, CPU and disk usage per server.
 
-**Keeps servers alive.** Optional automatic restart after a crash, with exponential backoff so a broken server does not flap. Version upgrades keep the world: pick a new Minecraft version and the panel swaps the jar, only committing after a verified download.
+**Plugins without the hunt.** On Paper servers the panel searches Modrinth directly: one click downloads a compatible plugin version (checksum verified, matched to your Minecraft version), shows installed plugins with available updates, and removes them again. Your own jars upload straight into `plugins/`.
+
+**Keeps servers alive.** Optional automatic restart after a crash, with exponential backoff so a broken server does not flap. Scheduled daily restarts warn players in chat before they happen. Version upgrades keep the world: pick a new Minecraft version and the panel swaps the jar, only committing after a verified download.
 
 **The boring but necessary parts.** One click to accept the Minecraft EULA, a `server.properties` editor that preserves your comments and unknown keys, autostart on boot, a console with command history, filtering and log download, and a graceful shutdown that lets every world save before the process exits.
 
