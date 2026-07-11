@@ -58,7 +58,7 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 **Two-factor authentication.** TOTP works with every standard authenticator app.
 
-**Updates itself.** The panel checks for new releases and updates in place at the click of a button: checksum-verified download, clean server shutdown, automatic restart. The systemd unit grants the service write access to exactly one file outside its data directory, its own binary.
+**Updates itself.** The panel checks for new releases and updates in place at the click of a button: checksum-verified download, atomic binary swap, automatic restart, and your Minecraft servers keep running through it. The binary lives inside the service's own directory, nothing outside it is ever written.
 
 **Security that is actually there.** Passwords are hashed with argon2id, sign in is rate limited per IP, session tokens are random 256 bit values stored hashed on disk, every mutating request needs a custom header so cross-site requests cannot forge one, and the systemd unit runs the panel sandboxed as its own unprivileged user.
 
@@ -224,10 +224,13 @@ The installer does nothing you cannot do yourself. Copy `craftpanel-linux-amd64`
 # verify the copy against dist/SHA256SUMS
 sha256sum /tmp/craftpanel-linux-amd64
 
-install -m 755 /tmp/craftpanel-linux-amd64 /usr/local/bin/craftpanel
-
 useradd --system --home-dir /var/lib/craftpanel --shell /usr/sbin/nologin craftpanel
-mkdir -p /var/lib/craftpanel
+
+# The binary lives in the service user's bin dir so self updates can swap it;
+# /usr/local/bin gets a symlink for the command line.
+mkdir -p /var/lib/craftpanel/bin
+install -m 755 -o craftpanel -g craftpanel /tmp/craftpanel-linux-amd64 /var/lib/craftpanel/bin/craftpanel
+ln -sfn /var/lib/craftpanel/bin/craftpanel /usr/local/bin/craftpanel
 chown -R craftpanel:craftpanel /var/lib/craftpanel
 chmod 750 /var/lib/craftpanel
 

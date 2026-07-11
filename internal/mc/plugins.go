@@ -139,23 +139,37 @@ func (m *Manager) ListPlugins(ctx context.Context, id string, checkUpdates bool)
 	return out, nil
 }
 
-// SearchPlugins queries Modrinth for Paper-compatible plugins.
-func (m *Manager) SearchPlugins(ctx context.Context, id, query string) ([]PluginSearchHit, error) {
+// searchIndexes are Modrinth's sort orders for search results.
+var searchIndexes = map[string]bool{
+	"relevance": true,
+	"downloads": true,
+	"follows":   true,
+	"newest":    true,
+	"updated":   true,
+}
+
+// SearchPlugins queries Modrinth for Paper-compatible plugins. An empty query
+// returns the most popular plugins, which the UI shows as suggestions.
+func (m *Manager) SearchPlugins(ctx context.Context, id, query, index string) ([]PluginSearchHit, error) {
 	srv, err := m.pluginServer(id)
 	if err != nil {
 		return nil, err
 	}
 	query = strings.TrimSpace(query)
-	if query == "" {
-		return []PluginSearchHit{}, nil
+	if !searchIndexes[index] {
+		index = "relevance"
+	}
+	if query == "" && index == "relevance" {
+		// Relevance is meaningless without a query, popularity is.
+		index = "downloads"
 	}
 	loaderFacet := []string{}
 	for _, l := range pluginLoaders {
 		loaderFacet = append(loaderFacet, "categories:"+l)
 	}
 	facets, _ := json.Marshal([][]string{{"project_type:plugin"}, loaderFacet})
-	searchURL := fmt.Sprintf("%s/search?limit=20&query=%s&facets=%s",
-		modrinthBase, url.QueryEscape(query), url.QueryEscape(string(facets)))
+	searchURL := fmt.Sprintf("%s/search?limit=20&query=%s&index=%s&facets=%s",
+		modrinthBase, url.QueryEscape(query), url.QueryEscape(index), url.QueryEscape(string(facets)))
 
 	var resp struct {
 		Hits []struct {

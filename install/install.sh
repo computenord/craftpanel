@@ -19,8 +19,12 @@ set -euo pipefail
 REPO="${CRAFTPANEL_REPO:-computenord/craftpanel}"
 VERSION="${CRAFTPANEL_VERSION:-latest}"
 PORT="${CRAFTPANEL_PORT:-8420}"
-BIN=/usr/local/bin/craftpanel
 DATA_DIR=/var/lib/craftpanel
+# The real binary lives inside the service user's directory so the panel can
+# replace it during self updates (the swap needs a writable directory).
+# /usr/local/bin/craftpanel stays as a symlink for the command line.
+BIN="$DATA_DIR/bin/craftpanel"
+BIN_LINK=/usr/local/bin/craftpanel
 UNIT=/etc/systemd/system/craftpanel.service
 SERVICE_USER=craftpanel
 
@@ -33,7 +37,7 @@ command -v systemctl >/dev/null 2>&1 || fail "systemd is required"
 if [ "${1:-}" = "--uninstall" ]; then
   say "Stopping and removing the craftpanel service"
   systemctl disable --now craftpanel 2>/dev/null || true
-  rm -f "$UNIT" "$BIN"
+  rm -f "$UNIT" "$BIN_LINK" "$BIN"
   systemctl daemon-reload
   say "Removed. Server data is still in $DATA_DIR, delete it yourself if you want a full wipe."
   exit 0
@@ -73,12 +77,13 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
   useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
-# The binary belongs to the service user so the panel can update itself from
-# the web UI. ReadWritePaths below limits that write access to exactly this
-# one file.
+# The binary and its directory belong to the service user so the panel can
+# swap the file during self updates.
+mkdir -p "$DATA_DIR/bin"
 install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$TMP" "$BIN"
+# Replace a binary from older installs with the command line symlink.
+ln -sfn "$BIN" "$BIN_LINK"
 
-mkdir -p "$DATA_DIR"
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
 chmod 750 "$DATA_DIR"
 
@@ -113,7 +118,7 @@ TimeoutStopSec=90
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$DATA_DIR $BIN
+ReadWritePaths=$DATA_DIR
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -151,4 +156,4 @@ say ""
 say "Useful commands:"
 say "  systemctl status craftpanel        service status"
 say "  journalctl -u craftpanel -f        live panel logs"
-say "  echo 'newpass' | sudo -u $SERVICE_USER -- $BIN -data $DATA_DIR reset-password <user>"
+say "  echo 'newpass' | sudo -u $SERVICE_USER -- $BIN_LINK -data $DATA_DIR reset-password <user>"

@@ -9,7 +9,7 @@ Wants=network-online.target
 Type=simple
 User=craftpanel
 Group=craftpanel
-ExecStart=/usr/local/bin/craftpanel -data /var/lib/craftpanel -addr :8420
+ExecStart=/var/lib/craftpanel/bin/craftpanel -data /var/lib/craftpanel -addr :8420
 Restart=always
 RestartSec=3
 
@@ -23,8 +23,8 @@ TimeoutStopSec=90
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-# The binary itself is writable so the panel can self update from the web UI.
-ReadWritePaths=/var/lib/craftpanel /usr/local/bin/craftpanel
+# The binary lives inside the data directory so the panel can self update.
+ReadWritePaths=/var/lib/craftpanel
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

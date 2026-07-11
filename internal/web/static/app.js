@@ -1269,8 +1269,16 @@ function renderPluginsTab(id) {
       <h2>${t("plugins.search")}</h2>
       <div class="add-row">
         <input type="text" id="plg-query" placeholder="${esc(t("plugins.searchPlaceholder"))}">
+        <select id="plg-sort" class="plg-sort">
+          <option value="relevance">${t("plugins.sortRelevance")}</option>
+          <option value="downloads">${t("plugins.sortDownloads")}</option>
+          <option value="follows">${t("plugins.sortFollows")}</option>
+          <option value="newest">${t("plugins.sortNewest")}</option>
+          <option value="updated">${t("plugins.sortUpdated")}</option>
+        </select>
         <button class="btn btn-sm btn-primary" id="plg-go">${t("plugins.searchBtn")}</button>
       </div>
+      <h3 class="sub" id="plg-results-head" hidden></h3>
       <div id="plg-results"></div>
     </div>`;
 
@@ -1296,12 +1304,15 @@ function renderPluginsTab(id) {
 
   const doSearch = async () => {
     const q = body.querySelector("#plg-query").value.trim();
+    const sort = body.querySelector("#plg-sort").value;
     const host = body.querySelector("#plg-results");
-    if (!q) { host.innerHTML = ""; return; }
+    const head = body.querySelector("#plg-results-head");
+    head.hidden = false;
+    head.textContent = q ? t("plugins.results") : t("plugins.popular");
     host.innerHTML = `<p class="hint">${t("misc.loading")}</p>`;
     let hits;
     try {
-      hits = await api(`/api/servers/${encodeURIComponent(id)}/plugins/search?q=${encodeURIComponent(q)}`);
+      hits = await api(`/api/servers/${encodeURIComponent(id)}/plugins/search?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}`);
     } catch (e) { host.innerHTML = ""; toastError(e); return; }
     if (hits.length === 0) {
       host.innerHTML = `<p class="hint">${t("plugins.noResults")}</p>`;
@@ -1339,11 +1350,13 @@ function renderPluginsTab(id) {
     }
   };
   body.querySelector("#plg-go").addEventListener("click", doSearch);
+  body.querySelector("#plg-sort").addEventListener("change", doSearch);
   body.querySelector("#plg-query").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); doSearch(); }
   });
 
   loadPluginList(id);
+  doSearch(); // empty query shows the most popular plugins as suggestions
 }
 
 async function loadPluginList(id) {

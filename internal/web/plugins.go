@@ -38,7 +38,7 @@ func (h *Handler) pluginsList(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) pluginsSearch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	hits, err := h.Manager.SearchPlugins(ctx, r.PathValue("id"), r.URL.Query().Get("q"))
+	hits, err := h.Manager.SearchPlugins(ctx, r.PathValue("id"), r.URL.Query().Get("q"), r.URL.Query().Get("sort"))
 	if err != nil {
 		pluginError(w, err)
 		return
