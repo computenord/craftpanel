@@ -115,6 +115,8 @@ func (h *Handler) system(w http.ResponseWriter, r *http.Request) {
 		"java":            h.javaVersion(),
 		"latest":          latest,
 		"updateAvailable": available,
+		"managed":         h.LockState != nil,
+		"lock":            h.lock(),
 	})
 }
 

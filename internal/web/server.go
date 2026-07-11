@@ -38,6 +38,9 @@ type Handler struct {
 	// Restart asks the main loop for a graceful shutdown with a restart exit
 	// code. Set by main, used by the self update endpoint.
 	Restart func()
+	// LockState reports the managed-mode lock level (none|grace|locked|
+	// suspended). Nil when the panel is self-hosted.
+	LockState func() string
 
 	javaMu      sync.Mutex
 	javaInfo    javaInfo
@@ -54,8 +57,8 @@ type javaInfo struct {
 	Major   int    `json:"major,omitempty"`
 }
 
-func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool, restart func()) http.Handler {
-	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy, Restart: restart}
+func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool, restart func(), lockState func() string) http.Handler {
+	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy, Restart: restart, LockState: lockState}
 
 	mux := http.NewServeMux()
 
@@ -136,7 +139,34 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("POST /api/servers/{id}/files/mkdir", h.fileMkdir)
 	mux.HandleFunc("POST /api/servers/{id}/files/rename", h.fileRename)
 
-	return h.securityHeaders(h.csrfGuard(h.authGate(mux)))
+	return h.securityHeaders(h.csrfGuard(h.authGate(h.lockGuard(mux))))
+}
+
+// lockGuard blocks state-changing API calls while the instance is locked or
+// suspended (managed mode, e.g. payment overdue). Reads stay allowed so the
+// customer can still see their servers; the UI shows a lock banner.
+func (h *Handler) lockGuard(next http.Handler) http.Handler {
+	allowed := map[string]bool{
+		"/api/login":  true,
+		"/api/logout": true,
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.LockState != nil && strings.HasPrefix(r.URL.Path, "/api/") && r.Method != http.MethodGet && !allowed[r.URL.Path] {
+			switch h.LockState() {
+			case "locked", "suspended":
+				apiError(w, http.StatusLocked, "locked", "this instance is locked, please check your ComputeBox account")
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (h *Handler) lock() string {
+	if h.LockState == nil {
+		return ""
+	}
+	return h.LockState()
 }
 
 func (h *Handler) securityHeaders(next http.Handler) http.Handler {

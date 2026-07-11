@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/computenord/craftpanel/internal/agent"
 	"github.com/computenord/craftpanel/internal/auth"
 	"github.com/computenord/craftpanel/internal/mc"
 	"github.com/computenord/craftpanel/internal/web"
@@ -31,12 +32,13 @@ func main() {
 	dataDir := flag.String("data", defaultDataDir(), "data directory")
 	addr := flag.String("addr", ":8420", "HTTP listen address")
 	trustProxy := flag.Bool("behind-proxy", false, "trust X-Forwarded-For from a reverse proxy for login rate limiting")
+	managed := flag.Bool("managed", false, "managed hosting mode: enroll with the control plane and report telemetry")
 	flag.Usage = usage
 	flag.Parse()
 
 	switch flag.Arg(0) {
 	case "", "serve":
-		if err := runServe(*dataDir, *addr, *trustProxy); err != nil {
+		if err := runServe(*dataDir, *addr, *trustProxy, *managed); err != nil {
 			log.Fatal(err)
 		}
 	case "reset-password":
@@ -76,7 +78,7 @@ func defaultDataDir() string {
 	return filepath.Join(home, ".craftpanel")
 }
 
-func runServe(dataDir, addr string, trustProxy bool) error {
+func runServe(dataDir, addr string, trustProxy, managed bool) error {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return err
 	}
@@ -107,9 +109,25 @@ func runServe(dataDir, addr string, trustProxy bool) error {
 		cancelForRestart()
 	}
 
+	// Managed hosting mode: start the control-plane agent if the VM was
+	// provisioned for it (agent.json present). Nil when self-hosted.
+	var lockState func() string
+	if managed {
+		ag, err := agent.Load(dataDir, manager, version, nil)
+		if err != nil {
+			return fmt.Errorf("load agent: %w", err)
+		}
+		if ag != nil {
+			lockState = ag.Lock
+			go ag.Run(ctx)
+		} else {
+			log.Printf("managed mode requested but no agent.json found, running unmanaged")
+		}
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           web.New(authStore, manager, versions, version, trustProxy, requestRestart),
+		Handler:           web.New(authStore, manager, versions, version, trustProxy, requestRestart, lockState),
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
