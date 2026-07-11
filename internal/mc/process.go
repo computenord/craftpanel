@@ -52,6 +52,7 @@ type Proc struct {
 	startedAt     time.Time
 	stopRequested bool
 	readyMarker   string
+	stopCommand   string // console command for a graceful stop, default "stop"
 	exited        chan struct{}
 	exitHook      func(crashed bool, uptime time.Duration)
 
@@ -97,6 +98,14 @@ func (p *Proc) SetExitHook(hook func(crashed bool, uptime time.Duration)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.exitHook = hook
+}
+
+// SetStopCommand overrides the console command used for graceful stops
+// (Velocity uses "shutdown" instead of "stop"). Call before Start.
+func (p *Proc) SetStopCommand(cmd string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stopCommand = cmd
 }
 
 // PID returns the server process id, or 0 when nothing is running.
@@ -187,7 +196,11 @@ func (p *Proc) Stop() error {
 	p.setStateLocked(StateStopping)
 	p.appendLineLocked("[craftpanel] Stopping server")
 	if p.stdin != nil {
-		_, _ = io.WriteString(p.stdin, "stop\n")
+		stopCmd := p.stopCommand
+		if stopCmd == "" {
+			stopCmd = "stop"
+		}
+		_, _ = io.WriteString(p.stdin, stopCmd+"\n")
 	}
 	exited := p.exited
 	p.mu.Unlock()

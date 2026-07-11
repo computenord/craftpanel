@@ -188,6 +188,42 @@ func (h *Handler) discordTest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
+/* ---------- velocity network ---------- */
+
+func (h *Handler) networkInfo(w http.ResponseWriter, r *http.Request) {
+	info, err := h.Manager.Network(r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, mc.ErrNotVelocity) {
+			apiError(w, http.StatusBadRequest, "not_velocity", "this server is not a velocity proxy")
+			return
+		}
+		managerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (h *Handler) networkSet(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Servers []string `json:"servers"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id := r.PathValue("id")
+	warnings, err := h.Manager.SetNetwork(id, req.Servers)
+	if err != nil {
+		if errors.Is(err, mc.ErrNotVelocity) {
+			apiError(w, http.StatusBadRequest, "not_velocity", "this server is not a velocity proxy")
+			return
+		}
+		managerError(w, err)
+		return
+	}
+	log.Printf("server %s: network set to %v (%d warnings)", id, req.Servers, len(warnings))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "warnings": warnings})
+}
+
 /* ---------- live players ---------- */
 
 func (h *Handler) playersList(w http.ResponseWriter, r *http.Request) {

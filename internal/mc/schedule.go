@@ -102,6 +102,10 @@ func (m *Manager) warnedRestart(srv *Server) {
 	id := srv.meta.ID
 	warn := srv.meta.RestartWarn
 	lang := srv.meta.Discord.Lang
+	// Velocity has no say command, restart without in-game warnings.
+	if srv.meta.Type == TypeVelocity {
+		warn = 0
+	}
 	srv.mu.Unlock()
 
 	stillRunning := func() bool { return srv.proc.State() == StateRunning }

@@ -36,7 +36,9 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 ## Features
 
-**Server management.** Pick Vanilla, Paper or Bedrock, pick a Minecraft version from the live list, and the panel downloads the server files straight from Mojang or PaperMC, verifying the upstream checksum where one is published. Run as many servers on one host as it can carry, each with its own port, memory limit and Java path. Bedrock needs no Java at all; the panel fetches the official Bedrock Dedicated Server, keeps worlds and configs across upgrades, and manages its allowlist with Xbox gamertags.
+**Server management.** Pick Vanilla, Paper, Bedrock or Velocity, pick a version from the live list, and the panel downloads the server files straight from Mojang or PaperMC, verifying the upstream checksum where one is published. Run as many servers on one host as it can carry, each with its own port, memory limit and Java path. Bedrock needs no Java at all; the panel fetches the official Bedrock Dedicated Server, keeps worlds and configs across upgrades, and manages its allowlist with Xbox gamertags.
+
+**Networks made easy.** Velocity is the modern proxy (the successor to BungeeCord/Waterfall) that puts several Paper servers behind one address. Create a Velocity proxy, open its Network tab, tick the Paper servers to connect, and the panel does the fiddly part for you: it writes the proxy's server list, generates a shared forwarding secret and drops it into each backend's `paper-global.yml` with modern forwarding enabled, and switches the backends to offline mode so only the proxy authenticates players.
 
 **No cryptic startup failures.** The panel knows which Java version each Minecraft release requires, because it reads that from Mojang alongside the download. If your JVM is too old it tells you so, instead of letting the server die with a bare `exit status 1`.
 

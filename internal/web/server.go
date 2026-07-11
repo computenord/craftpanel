@@ -114,6 +114,8 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("GET /api/servers/{id}/backups/download", h.backupDownload)
 	mux.HandleFunc("POST /api/servers/{id}/upgrade", h.upgrade)
 	mux.HandleFunc("POST /api/servers/{id}/discord/test", h.discordTest)
+	mux.HandleFunc("GET /api/servers/{id}/network", h.networkInfo)
+	mux.HandleFunc("PUT /api/servers/{id}/network", h.networkSet)
 	mux.HandleFunc("GET /api/servers/{id}/plugins", h.pluginsList)
 	mux.HandleFunc("GET /api/servers/{id}/plugins/search", h.pluginsSearch)
 	mux.HandleFunc("POST /api/servers/{id}/plugins/install", h.pluginInstall)

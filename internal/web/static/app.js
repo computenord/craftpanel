@@ -601,7 +601,7 @@ async function openCreateModal() {
       <label class="field"><span>${t("create.name")}</span><input type="text" name="name" maxlength="40" required></label>
       <div class="form-row">
         <label class="field"><span>${t("create.type")}</span>
-          <select name="type"><option value="paper">Paper</option><option value="vanilla">Vanilla</option><option value="bedrock">Bedrock</option></select>
+          <select name="type"><option value="paper">Paper</option><option value="vanilla">Vanilla</option><option value="bedrock">Bedrock</option><option value="velocity">Velocity (Proxy)</option></select>
         </label>
         <label class="field"><span>${t("create.version")}</span>
           <select name="version" disabled><option>${t("create.loadingVersions")}</option></select>
@@ -617,6 +617,7 @@ async function openCreateModal() {
         </label>
       </div>
       <p class="hint" id="bedrock-hint" hidden>${t("create.bedrockHint")}</p>
+      <p class="hint" id="velocity-hint" hidden>${t("create.velocityHint")}</p>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="create-cancel">${t("misc.cancel")}</button>
         <button type="submit" class="btn btn-primary" id="create-submit">${t("create.submit")}</button>
@@ -645,6 +646,7 @@ async function openCreateModal() {
     const bedrock = typeSel.value === "bedrock";
     box.querySelector("#create-mem").hidden = bedrock;
     box.querySelector("#bedrock-hint").hidden = !bedrock;
+    box.querySelector("#velocity-hint").hidden = typeSel.value !== "velocity";
   };
   typeSel.addEventListener("change", () => { syncTypeUI(); loadVersions(); });
   syncTypeUI();
@@ -690,8 +692,9 @@ async function renderDetail(id, tab) {
     <div id="detail-head"></div>
     <nav class="tabs" id="tabs">
       <button data-tab="console">${t("tabs.console")}</button>
-      <button data-tab="players">${t("tabs.players")}</button>
-      ${s.type === "paper" ? `<button data-tab="plugins">${t("tabs.plugins")}</button>` : ""}
+      ${s.type === "velocity" ? "" : `<button data-tab="players">${t("tabs.players")}</button>`}
+      ${s.type === "velocity" ? `<button data-tab="network">${t("tabs.network")}</button>` : ""}
+      ${s.type === "paper" || s.type === "velocity" ? `<button data-tab="plugins">${t("tabs.plugins")}</button>` : ""}
       <button data-tab="files">${t("tabs.files")}</button>
       <button data-tab="backups">${t("tabs.backups")}</button>
       <button data-tab="settings">${t("tabs.settings")}</button>
@@ -704,9 +707,11 @@ async function renderDetail(id, tab) {
       location.hash = `#/server/${encodeURIComponent(id)}/${b.dataset.tab}`;
     });
   });
+  const plugins = s.type === "paper" || s.type === "velocity";
   if (tab === "files") renderFilesTab(id);
-  else if (tab === "players") renderPlayersTab(id);
-  else if (tab === "plugins" && s.type === "paper") renderPluginsTab(id);
+  else if (tab === "players" && s.type !== "velocity") renderPlayersTab(id);
+  else if (tab === "network" && s.type === "velocity") renderNetworkTab(id);
+  else if (tab === "plugins" && plugins) renderPluginsTab(id);
   else if (tab === "backups") renderBackupsTab(id);
   else if (tab === "settings") renderSettingsTab(id, s);
   else renderConsoleTab(id, s);
@@ -1546,12 +1551,12 @@ async function loadBackups(id) {
 async function renderSettingsTab(id, s) {
   const body = document.getElementById("tab-body");
   body.innerHTML = `
-    <div class="panel" id="eula-panel">
+    ${s.type === "velocity" ? "" : `<div class="panel" id="eula-panel">
       <h2>${t("eula.title")}</h2>
       <p class="hint">${t("eula.text")}
         <a href="https://aka.ms/MinecraftEULA" target="_blank" rel="noopener">${t("eula.link")}</a></p>
       <div id="eula-state"></div>
-    </div>
+    </div>`}
 
     <div class="panel">
       <h2>${t("settings.title")}</h2>
@@ -1600,10 +1605,10 @@ async function renderSettingsTab(id, s) {
       <button class="btn" id="up-btn">${ICONS.restart} ${t("upgrade.button")}</button>
     </div>
 
-    <div class="panel">
+    ${s.type === "velocity" ? "" : `<div class="panel">
       <h2>${t("access.title")}</h2>
       <div id="access-body">${t("misc.loading")}</div>
-    </div>
+    </div>`}
 
     <div class="panel">
       <h2>${t("discord.title")}</h2>
@@ -1622,8 +1627,8 @@ async function renderSettingsTab(id, s) {
           <span>${t("discord.backups")}</span></label>
         <label class="check"><input type="checkbox" name="players" ${s.discord && s.discord.players ? "checked" : ""}>
           <span>${t("discord.players")}</span></label>
-        ${s.type === "bedrock"
-          ? `<p class="hint">${t("discord.chatBedrock")}</p>`
+        ${s.type === "bedrock" || s.type === "velocity"
+          ? ""
           : `<label class="check"><input type="checkbox" name="chat" ${s.discord && s.discord.chat ? "checked" : ""}>
               <span>${t("discord.chat")}</span></label>`}
         <div class="modal-actions">
@@ -1633,11 +1638,11 @@ async function renderSettingsTab(id, s) {
       </form>
     </div>
 
-    <div class="panel">
+    ${s.type === "velocity" ? "" : `<div class="panel">
       <h2>${t("props.title")}</h2>
       <p class="hint">${t("props.hint")}</p>
       <div id="props-body">${t("misc.loading")}</div>
-    </div>
+    </div>`}
 
     <div class="panel danger">
       <h2>${t("danger.title")}</h2>
@@ -1647,7 +1652,7 @@ async function renderSettingsTab(id, s) {
       <button class="btn btn-danger" id="del-btn" disabled>${ICONS.trash} ${t("danger.delete")}</button>
     </div>`;
 
-  renderEulaState(id, s.eula);
+  if (s.type !== "velocity") renderEulaState(id, s.eula);
 
   body.querySelector("#settings-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1745,8 +1750,57 @@ async function renderSettingsTab(id, s) {
     } catch (err) { toastError(err); }
   });
 
-  loadAccess(id);
-  loadProperties(id, s.type);
+  if (s.type !== "velocity") {
+    loadAccess(id);
+    loadProperties(id, s.type);
+  }
+}
+
+/* ---------- velocity network ---------- */
+
+function renderNetworkTab(id) {
+  const body = document.getElementById("tab-body");
+  body.innerHTML = `
+    <div class="panel">
+      <h2>${t("network.title")}</h2>
+      <p class="hint">${t("network.hint")}</p>
+      <div id="net-body">${t("misc.loading")}</div>
+    </div>`;
+  loadNetwork(id);
+}
+
+async function loadNetwork(id) {
+  const host = document.getElementById("net-body");
+  if (!host) return;
+  let info;
+  try {
+    info = await api(`/api/servers/${encodeURIComponent(id)}/network`);
+  } catch (e) { host.textContent = ""; toastError(e); return; }
+
+  if (info.backends.length === 0) {
+    host.innerHTML = `<p class="hint">${t("network.noBackends")}</p>`;
+    return;
+  }
+  host.innerHTML = `<ul class="plist" id="net-list"></ul>
+    <div class="modal-actions"><button class="btn btn-primary" id="net-save">${t("network.save")}</button></div>
+    <div id="net-warn"></div>`;
+  const ul = host.querySelector("#net-list");
+  for (const b of info.backends) {
+    const li = el(`<li>
+      <label class="check" style="margin:0"><input type="checkbox" ${b.linked ? "checked" : ""} data-sid="${esc(b.id)}">
+        <span><b>${esc(b.name)}</b> <span class="plg-desc">${t("misc.port")} ${b.port}</span></span></label>
+    </li>`);
+    ul.appendChild(li);
+  }
+  host.querySelector("#net-save").addEventListener("click", async () => {
+    const servers = [...ul.querySelectorAll("input:checked")].map((i) => i.dataset.sid);
+    try {
+      const res = await api(`/api/servers/${encodeURIComponent(id)}/network`, { method: "PUT", body: { servers } });
+      toast(t("network.saved"), "ok");
+      const warnHost = host.querySelector("#net-warn");
+      warnHost.innerHTML = (res.warnings || []).map((w) => `<div class="notice">${esc(w)}</div>`).join("");
+    } catch (e) { toastError(e); }
+  });
 }
 
 /* ---------- whitelist and ops ---------- */

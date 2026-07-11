@@ -28,16 +28,17 @@ import (
 // Server binaries and metadata are only ever fetched from these official sources.
 const (
 	mojangManifestURL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-	paperAPIBase      = "https://fill.papermc.io/v3/projects/paper"
+	fillAPIBase       = "https://fill.papermc.io/v3/projects"
 	bedrockLinksURL   = "https://net-secondary.web.minecraft-services.net/api/v1.0/download/links"
 	userAgent         = "ComputeBox-Craftpanel (+https://computebox.de)"
 	// minecraft.net's CDN drops connections from non-browser user agents on
 	// the BDS zip downloads, so those requests masquerade as a browser.
 	browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-	TypeVanilla = "vanilla"
-	TypePaper   = "paper"
-	TypeBedrock = "bedrock"
+	TypeVanilla  = "vanilla"
+	TypePaper    = "paper"
+	TypeBedrock  = "bedrock"
+	TypeVelocity = "velocity"
 )
 
 var metaClient = &http.Client{Timeout: 30 * time.Second}
@@ -120,7 +121,9 @@ func (v *Versions) List(ctx context.Context, typ string) ([]VersionInfo, error) 
 	case TypeVanilla:
 		list, err = listVanilla(ctx)
 	case TypePaper:
-		list, err = listPaper(ctx)
+		list, err = listFill(ctx, "paper")
+	case TypeVelocity:
+		list, err = listFill(ctx, "velocity")
 	case TypeBedrock:
 		list, err = listBedrock(ctx)
 	default:
@@ -145,7 +148,10 @@ func (v *Versions) DownloadServerJar(ctx context.Context, typ, version, destPath
 		url, sum, err = resolveVanilla(ctx, version)
 		algo = "sha1"
 	case TypePaper:
-		url, sum, err = resolvePaper(ctx, version)
+		url, sum, err = resolveFill(ctx, "paper", version)
+		algo = "sha256"
+	case TypeVelocity:
+		url, sum, err = resolveFill(ctx, "velocity", version)
 		algo = "sha256"
 	default:
 		return fmt.Errorf("unknown server type %q", typ)
@@ -219,14 +225,15 @@ func resolveVanilla(ctx context.Context, version string) (url, sha1sum string, e
 	return detail.Downloads.Server.URL, detail.Downloads.Server.SHA1, nil
 }
 
-// listPaper uses the PaperMC Fill v3 API. Versions come grouped by minor
-// release and include pre-releases, which we filter out.
-func listPaper(ctx context.Context) ([]VersionInfo, error) {
+// listFill lists releases of a PaperMC project (paper, velocity) via the
+// Fill v3 API. Versions come grouped by minor release and include
+// pre-releases and snapshots, which we filter out.
+func listFill(ctx context.Context, project string) ([]VersionInfo, error) {
 	var proj struct {
 		Versions map[string][]string `json:"versions"`
 	}
-	if err := getJSON(ctx, paperAPIBase, &proj); err != nil {
-		return nil, fmt.Errorf("paper project info: %w", err)
+	if err := getJSON(ctx, fillAPIBase+"/"+project, &proj); err != nil {
+		return nil, fmt.Errorf("%s project info: %w", project, err)
 	}
 	var out []VersionInfo
 	for _, group := range proj.Versions {
@@ -256,13 +263,13 @@ type paperBuild struct {
 	} `json:"downloads"`
 }
 
-func resolvePaper(ctx context.Context, version string) (url, sha256sum string, err error) {
+func resolveFill(ctx context.Context, project, version string) (url, sha256sum string, err error) {
 	var builds []paperBuild
-	if err := getJSON(ctx, fmt.Sprintf("%s/versions/%s/builds", paperAPIBase, version), &builds); err != nil {
-		return "", "", fmt.Errorf("paper builds for %s: %w", version, err)
+	if err := getJSON(ctx, fmt.Sprintf("%s/%s/versions/%s/builds", fillAPIBase, project, version), &builds); err != nil {
+		return "", "", fmt.Errorf("%s builds for %s: %w", project, version, err)
 	}
 	if len(builds) == 0 {
-		return "", "", fmt.Errorf("no paper builds available for %s", version)
+		return "", "", fmt.Errorf("no %s builds available for %s", project, version)
 	}
 	// The API lists newest builds first. Prefer the newest stable build.
 	pick := builds[0]
@@ -274,7 +281,7 @@ func resolvePaper(ctx context.Context, version string) (url, sha256sum string, e
 	}
 	dl, ok := pick.Downloads["server:default"]
 	if !ok || dl.URL == "" {
-		return "", "", fmt.Errorf("paper build %d for %s has no server download", pick.ID, version)
+		return "", "", fmt.Errorf("%s build %d for %s has no server download", project, pick.ID, version)
 	}
 	return dl.URL, dl.Checksums.SHA256, nil
 }

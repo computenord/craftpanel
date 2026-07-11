@@ -23,6 +23,7 @@ type runState struct {
 	ProcStart uint64    `json:"procStart"` // /proc start ticks, guards pid reuse
 	StartedAt time.Time `json:"startedAt"`
 	Marker    string    `json:"marker,omitempty"`
+	StopCmd   string    `json:"stopCmd,omitempty"`
 }
 
 // Start launches the server process. Its console goes to a log file and its
@@ -93,7 +94,7 @@ func (p *Proc) Start(bin string, args, extraEnv []string, readyMarker string) er
 	p.setStateLocked(StateStarting)
 	p.appendLineLocked(startCommandLine(bin, args))
 
-	rs := runState{PID: p.pid, ProcStart: procStartTicks(p.pid), StartedAt: p.startedAt, Marker: readyMarker}
+	rs := runState{PID: p.pid, ProcStart: procStartTicks(p.pid), StartedAt: p.startedAt, Marker: readyMarker, StopCmd: p.stopCommand}
 	if err := fsutil.WriteJSONAtomic(filepath.Join(p.ctlDir, runFile), rs); err != nil {
 		p.appendLineLocked("[craftpanel] Warning: could not persist run state: " + err.Error())
 	}
@@ -134,6 +135,7 @@ func (p *Proc) TryAdopt() bool {
 	p.pid = rs.PID
 	p.startedAt = rs.StartedAt
 	p.readyMarker = rs.Marker
+	p.stopCommand = rs.StopCmd
 	p.stopRequested = false
 	p.exited = make(chan struct{})
 	p.setStateLocked(StateRunning)

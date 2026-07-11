@@ -153,7 +153,8 @@ func (m *Manager) doBackup(srv *Server, kind string) (string, int64, error) {
 	dest := filepath.Join(dir, name)
 
 	// Freeze world saving while the copy runs, so region files are consistent.
-	if srv.proc.State() == StateRunning {
+	// Velocity proxies have no world, nothing to freeze there.
+	if srv.proc.State() == StateRunning && srv.meta.Type != TypeVelocity {
 		if srv.meta.Type == TypeBedrock {
 			srv.proc.SendCommand("save hold")
 			for i := 0; i < 15; i++ {

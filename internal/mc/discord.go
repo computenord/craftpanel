@@ -195,6 +195,7 @@ var (
 	javaLeaveLineRe = regexp.MustCompile(`\]: ([A-Za-z0-9_]{2,16}) left the game$`)
 	bedrockJoinRe   = regexp.MustCompile(`Player connected: ([^,]+),`)
 	bedrockLeaveRe  = regexp.MustCompile(`Player disconnected: ([^,]+),`)
+	velocityConnRe  = regexp.MustCompile(`\[connected player\] (\S+) .*has (connected|disconnected)`)
 )
 
 // watchServer follows the console stream of one server for its whole life
@@ -221,10 +222,21 @@ func (m *Manager) watchServer(srv *Server) {
 
 func (m *Manager) scanConsoleLine(srv *Server, line string) {
 	srv.mu.Lock()
-	bedrock := srv.meta.Type == TypeBedrock
+	typ := srv.meta.Type
+	bedrock := typ == TypeBedrock
 	cfg := srv.meta.Discord
 	srv.mu.Unlock()
 	if cfg.Webhook == "" || (!cfg.Players && !cfg.Chat) {
+		return
+	}
+	if typ == TypeVelocity {
+		if mres := velocityConnRe.FindStringSubmatch(line); mres != nil {
+			key := "join"
+			if mres[2] == "disconnected" {
+				key = "leave"
+			}
+			m.notify(srv, notifyPlayer, key, mres[1])
+		}
 		return
 	}
 	if bedrock {

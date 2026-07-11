@@ -217,6 +217,13 @@ const STRINGS = {
     "discord.test": "Send test message",
     "discord.testOk": "Test message sent",
 
+    "tabs.network": "Network",
+    "network.title": "Network servers",
+    "network.hint": "Pick the Paper servers this proxy should connect. The panel writes the proxy's server list and sets up modern forwarding (a shared secret) on each backend, and switches the backends to offline mode so only the proxy authenticates players.",
+    "network.noBackends": "No Paper servers to link yet. Create a Paper server first.",
+    "network.save": "Save network",
+    "network.saved": "Network saved. Restart the proxy and the linked servers for it to take effect.",
+
     "tabs.plugins": "Plugins",
     "plugins.installed": "Installed plugins",
     "plugins.hint": "New or updated plugins load on the next server restart.",
@@ -282,6 +289,7 @@ const STRINGS = {
     "access.gamertag": "Xbox gamertag",
     "access.bedrockHint": "Bedrock servers use Xbox gamertags. Names are not validated; the server fills in the XUID when the player first joins. Operators are managed in game with /op.",
     "create.bedrockHint": "Bedrock Dedicated Server is only distributed in its latest version and needs no Java. It uses UDP; the panel reserves two consecutive ports (IPv4 and IPv6).",
+    "create.velocityHint": "Velocity is a proxy that puts several Paper servers behind one address (the modern successor to BungeeCord). Create your Paper servers first, then link them in the proxy's Network tab.",
 
     "panel.title": "Panel settings",
     "panel.version": "Installed version",
@@ -538,6 +546,13 @@ const STRINGS = {
     "discord.test": "Testnachricht senden",
     "discord.testOk": "Testnachricht gesendet",
 
+    "tabs.network": "Netzwerk",
+    "network.title": "Netzwerk-Server",
+    "network.hint": "Wähle die Paper-Server, die dieser Proxy verbinden soll. Das Panel schreibt die Serverliste des Proxys, richtet auf jedem Backend modernes Forwarding ein (ein gemeinsames Secret) und stellt die Backends auf Offline-Modus, sodass nur der Proxy die Spieler authentifiziert.",
+    "network.noBackends": "Noch keine Paper-Server zum Verbinden. Lege zuerst einen Paper-Server an.",
+    "network.save": "Netzwerk speichern",
+    "network.saved": "Netzwerk gespeichert. Starte den Proxy und die verbundenen Server neu, damit es wirkt.",
+
     "tabs.plugins": "Plugins",
     "plugins.installed": "Installierte Plugins",
     "plugins.hint": "Neue oder aktualisierte Plugins laden beim nächsten Server-Neustart.",
@@ -603,6 +618,7 @@ const STRINGS = {
     "access.gamertag": "Xbox-Gamertag",
     "access.bedrockHint": "Bedrock-Server verwenden Xbox-Gamertags. Namen werden nicht validiert; die XUID trägt der Server beim ersten Join selbst ein. Operatoren werden im Spiel per /op verwaltet.",
     "create.bedrockHint": "Bedrock Dedicated Server gibt es nur in der jeweils neuesten Version und braucht kein Java. Er nutzt UDP; das Panel reserviert zwei aufeinanderfolgende Ports (IPv4 und IPv6).",
+    "create.velocityHint": "Velocity ist ein Proxy, der mehrere Paper-Server hinter einer Adresse bündelt (der moderne Nachfolger von BungeeCord). Lege zuerst deine Paper-Server an und verbinde sie dann im Netzwerk-Tab des Proxys.",
 
     "panel.title": "Panel-Einstellungen",
     "panel.version": "Installierte Version",

@@ -18,10 +18,15 @@ import (
 // Plugins are fetched from Modrinth's open API.
 const modrinthBase = "https://api.modrinth.com/v2"
 
-// pluginLoaders are the Modrinth loader tags a Paper server can run.
-var pluginLoaders = []string{"paper", "spigot", "bukkit", "folia"}
+// loadersFor maps a server type to the Modrinth loader tags it can run.
+func loadersFor(typ string) []string {
+	if typ == TypeVelocity {
+		return []string{"velocity"}
+	}
+	return []string{"paper", "spigot", "bukkit", "folia"}
+}
 
-var ErrPluginsUnsupported = errors.New("plugins are only available on paper servers")
+var ErrPluginsUnsupported = errors.New("plugins are only available on paper and velocity servers")
 
 const pluginManifestFile = "plugins.json"
 
@@ -59,7 +64,7 @@ func (m *Manager) pluginServer(id string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if srv.meta.Type != TypePaper {
+	if srv.meta.Type != TypePaper && srv.meta.Type != TypeVelocity {
 		return nil, ErrPluginsUnsupported
 	}
 	return srv, nil
@@ -121,12 +126,13 @@ func (m *Manager) ListPlugins(ctx context.Context, id string, checkUpdates bool)
 	if checkUpdates {
 		srv.mu.Lock()
 		mcVersion := srv.meta.Version
+		loaders := loadersFor(srv.meta.Type)
 		srv.mu.Unlock()
 		for i := range out {
 			if !out[i].Managed || out[i].ProjectID == "" {
 				continue
 			}
-			ver, _, err := resolvePluginVersion(ctx, out[i].ProjectID, mcVersion)
+			ver, _, err := resolvePluginVersion(ctx, out[i].ProjectID, mcVersion, loaders)
 			if err != nil {
 				continue
 			}
@@ -164,7 +170,7 @@ func (m *Manager) SearchPlugins(ctx context.Context, id, query, index string) ([
 		index = "downloads"
 	}
 	loaderFacet := []string{}
-	for _, l := range pluginLoaders {
+	for _, l := range loadersFor(srv.meta.Type) {
 		loaderFacet = append(loaderFacet, "categories:"+l)
 	}
 	facets, _ := json.Marshal([][]string{{"project_type:plugin"}, loaderFacet})
@@ -229,8 +235,8 @@ type modrinthFile struct {
 // resolvePluginVersion picks the newest plugin version for the server's
 // Minecraft version, falling back to the newest Paper-compatible version of
 // any game version when nothing matches exactly.
-func resolvePluginVersion(ctx context.Context, projectID, mcVersion string) (modrinthVersion, modrinthFile, error) {
-	loaders, _ := json.Marshal(pluginLoaders)
+func resolvePluginVersion(ctx context.Context, projectID, mcVersion string, loaderList []string) (modrinthVersion, modrinthFile, error) {
+	loaders, _ := json.Marshal(loaderList)
 	fetch := func(withGameVersion bool) ([]modrinthVersion, error) {
 		u := fmt.Sprintf("%s/project/%s/version?loaders=%s",
 			modrinthBase, url.PathEscape(projectID), url.QueryEscape(string(loaders)))
@@ -300,7 +306,7 @@ func (m *Manager) InstallPlugin(ctx context.Context, id, projectID string) (Plug
 	if err := getJSON(ctx, modrinthBase+"/project/"+url.PathEscape(projectID), &project); err != nil {
 		return PluginEntry{}, fmt.Errorf("modrinth project: %w", err)
 	}
-	ver, file, err := resolvePluginVersion(ctx, projectID, mcVersion)
+	ver, file, err := resolvePluginVersion(ctx, projectID, mcVersion, loadersFor(srv.meta.Type))
 	if err != nil {
 		return PluginEntry{}, err
 	}
