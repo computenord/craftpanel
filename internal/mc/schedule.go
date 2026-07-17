@@ -8,12 +8,17 @@ import (
 	"time"
 )
 
-// runScheduler drives all time based per-server jobs: daily backups and
-// scheduled restarts with player warnings.
+// runScheduler drives all time based per-server jobs: daily backups,
+// scheduled restarts with player warnings and DNS upkeep.
 func (m *Manager) runScheduler() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	tick := 0
 	for range ticker.C {
+		tick++
+		if tick%10 == 0 { // every 5 minutes
+			go m.dnsMaintenance()
+		}
 		now := time.Now()
 		hhmm := now.Format("15:04")
 		day := now.Format("20060102")

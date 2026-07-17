@@ -533,7 +533,8 @@ function updateServerCard(card, s) {
 
   const meta = card.querySelector(".sc-meta");
   const metaHTML = `<span>${esc(s.type)} <b>${esc(s.version)}</b></span>
-    <span>${t("misc.port")} <b>${s.port}</b></span>
+    ${s.domain ? `<span><b>${esc(s.domain + (s.domainPort ? ":" + s.domainPort : ""))}</b></span>`
+      : `<span>${t("misc.port")} <b>${s.port}</b></span>`}
     ${s.javaMajor ? `<span>${esc(t("java.needs", { need: s.javaMajor }))}</span>` : ""}
     ${s.status === "running" && s.players ? `<span>${t("players.label")} <b>${s.players.online}/${s.players.max}</b></span>` : ""}
     ${s.status === "running" && s.rssMB ? `<span>RAM <b>${s.rssMB} MB</b></span>` : ""}
@@ -721,7 +722,11 @@ async function renderDetail(id, tab) {
 
 function renderDetailHead(s) {
   const host = location.hostname || "localhost";
-  const addr = `${host}:${s.port}`;
+  // With a domain mapping the server has a real hostname; domainPort is 0
+  // when players do not need to type a port at all.
+  const addr = s.domain
+    ? s.domain + (s.domainPort ? ":" + s.domainPort : "")
+    : `${host}:${s.port}`;
   const head = document.getElementById("detail-head");
   if (!head) return;
   head.innerHTML = `
@@ -1781,14 +1786,25 @@ async function loadNetwork(id) {
     host.innerHTML = `<p class="hint">${t("network.noBackends")}</p>`;
     return;
   }
-  host.innerHTML = `<ul class="plist" id="net-list"></ul>
+  // With a domain mapping every linked backend gets its own hostname via
+  // forced hosts; players need no port when the proxy listens on 25565 or
+  // the panel manages SRV records.
+  let domainHint = "";
+  if (info.domain) {
+    domainHint = `<p class="hint">${esc(t("network.domainHint", { domain: info.domain }))}</p>`;
+    if (info.proxyPort !== 25565 && !info.dnsManaged) {
+      domainHint += `<div class="notice">${esc(t("network.domainPortWarn", { port: info.proxyPort }))}</div>`;
+    }
+  }
+  host.innerHTML = `${domainHint}<ul class="plist" id="net-list"></ul>
     <div class="modal-actions"><button class="btn btn-primary" id="net-save">${t("network.save")}</button></div>
     <div id="net-warn"></div>`;
   const ul = host.querySelector("#net-list");
   for (const b of info.backends) {
+    const mapped = info.domain ? ` <span class="plg-desc">&rarr; ${esc(b.id + "." + info.domain)}</span>` : "";
     const li = el(`<li>
       <label class="check" style="margin:0"><input type="checkbox" ${b.linked ? "checked" : ""} data-sid="${esc(b.id)}">
-        <span><b>${esc(b.name)}</b> <span class="plg-desc">${t("misc.port")} ${b.port}</span></span></label>
+        <span><b>${esc(b.name)}</b> <span class="plg-desc">${t("misc.port")} ${b.port}</span>${mapped}</span></label>
     </li>`);
     ul.appendChild(li);
   }
@@ -1969,23 +1985,88 @@ async function openPanelSettings() {
     <p class="hint" id="ps-version"></p>
     <label class="field"><span>${t("panel.backupDir")}</span><input type="text" id="ps-backupdir"></label>
     <p class="hint">${esc(t("panel.backupDirHint"))}</p>
+    <hr class="sep-line">
+    <h2>${t("panel.domainTitle")}</h2>
+    <p class="hint">${esc(t("panel.domainHint"))}</p>
+    <label class="field"><span>${t("panel.domain")}</span><input type="text" id="ps-domain" placeholder="mc.example.com" autocomplete="off"></label>
+    <label class="field"><span>${t("panel.dnsProvider")}</span>
+      <select id="ps-dnsprov">
+        <option value="">${t("panel.dnsManual")}</option>
+        <option value="cloudflare">${t("panel.dnsCloudflare")}</option>
+      </select></label>
+    <div id="ps-dns-cf">
+      <label class="field"><span>${t("panel.dnsToken")}</span><input type="password" id="ps-dnstoken" autocomplete="off"></label>
+      <p class="hint">${esc(t("panel.dnsTokenHint"))}</p>
+      <label class="field"><span>${t("panel.dnsTarget")}</span><input type="text" id="ps-dnstarget" autocomplete="off"></label>
+      <p class="hint">${esc(t("panel.dnsTargetHint"))}</p>
+    </div>
     <div class="modal-actions"><button class="btn btn-primary" id="ps-save">${t("settings.save")}</button></div>
+    <div id="ps-dns-sync" class="add-row" style="align-items:center">
+      <button class="btn btn-sm" id="ps-dnssync">${t("panel.dnsSync")}</button>
+      <span class="hint" id="ps-dnsstatus"></span>
+    </div>
+    <div id="ps-warnings"></div>
     <hr class="sep-line">
     <h2>${t("totp.title")}</h2>
     <div id="totp-body"></div>
     <div class="modal-actions"><button class="btn btn-ghost" id="ps-close">${t("misc.close")}</button></div>
   </div>`);
-  openModal(box);
+  openModal(box, true);
   renderVersionLine(box);
   box.querySelector("#ps-backupdir").value = settings.backupDir || "";
+  box.querySelector("#ps-domain").value = settings.domain || "";
+  box.querySelector("#ps-dnstarget").value = settings.dnsTarget || "";
+  const prov = box.querySelector("#ps-dnsprov");
+  prov.value = settings.dnsProvider || "";
+
+  const applyDnsUI = () => {
+    const cf = prov.value === "cloudflare";
+    box.querySelector("#ps-dns-cf").style.display = cf ? "" : "none";
+    box.querySelector("#ps-dns-sync").style.display = cf && settings.dnsTokenSet ? "" : "none";
+    box.querySelector("#ps-dnstoken").placeholder = settings.dnsTokenSet ? t("panel.dnsTokenSaved") : "";
+    renderDnsStatus(box.querySelector("#ps-dnsstatus"), settings.dns);
+  };
+  applyDnsUI();
+  prov.addEventListener("change", applyDnsUI);
+
   box.querySelector("#ps-close").addEventListener("click", closeModal);
   box.querySelector("#ps-save").addEventListener("click", async () => {
+    const body = {
+      backupDir: box.querySelector("#ps-backupdir").value.trim(),
+      domain: box.querySelector("#ps-domain").value.trim(),
+      dnsProvider: prov.value,
+      dnsTarget: box.querySelector("#ps-dnstarget").value.trim()
+    };
+    const token = box.querySelector("#ps-dnstoken").value.trim();
+    if (token) body.dnsToken = token;
     try {
-      await api("/api/settings", { method: "PUT", body: { backupDir: box.querySelector("#ps-backupdir").value.trim() } });
+      settings = await api("/api/settings", { method: "PUT", body });
+      box.querySelector("#ps-dnstoken").value = "";
+      box.querySelector("#ps-warnings").innerHTML =
+        (settings.warnings || []).map((w) => `<div class="notice">${esc(w)}</div>`).join("");
+      applyDnsUI();
       toast(t("settings.saved"), "ok");
     } catch (e) { toastError(e); }
   });
+  box.querySelector("#ps-dnssync").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      settings.dns = await api("/api/dns/sync", { method: "POST", body: {} });
+      renderDnsStatus(box.querySelector("#ps-dnsstatus"), settings.dns);
+      toast(t("panel.dnsSynced", { n: settings.dns.records }), "ok");
+    } catch (err) { toastError(err); } finally { e.target.disabled = false; }
+  });
   renderTotpBody(box.querySelector("#totp-body"));
+}
+
+function renderDnsStatus(host, st) {
+  if (!host) return;
+  if (!st || !st.lastSync) { host.textContent = t("panel.dnsNever"); return; }
+  let text = st.ok
+    ? t("panel.dnsOk", { time: fmtDate(st.lastSync), n: st.records, target: st.target })
+    : t("panel.dnsFailed", { err: st.error || "?" });
+  if (st.warnings && st.warnings.length) text += " — " + st.warnings.join("; ");
+  host.textContent = text;
 }
 
 function renderTotpBody(host) {

@@ -24,6 +24,8 @@ const (
 	forwardSecret   = "forwarding.secret"
 	serversBlockTop = "# craftpanel:servers:start"
 	serversBlockEnd = "# craftpanel:servers:end"
+	forcedBlockTop  = "# craftpanel:forced-hosts:start"
+	forcedBlockEnd  = "# craftpanel:forced-hosts:end"
 )
 
 // writeVelocityConfig creates the initial proxy configuration at server
@@ -50,9 +52,90 @@ forwarding-secret-file = "forwarding.secret"
 try = []
 %s
 
+%s
+[forced-hosts]
+%s
+
 [advanced]
-`, port, sanitizeMOTD(name), serversBlockTop, serversBlockEnd)
+`, port, sanitizeMOTD(name), serversBlockTop, serversBlockEnd, forcedBlockTop, forcedBlockEnd)
 	return fsutil.WriteFileAtomic(filepath.Join(dataDir, velocityConfig), []byte(toml), 0o644)
+}
+
+// spliceBlock replaces the marker-delimited managed section of a config
+// file, appending a fresh block when the markers were edited away.
+func spliceBlock(content, top, end, block string) string {
+	s := strings.Index(content, top)
+	e := strings.Index(content, end)
+	if s >= 0 && e > s {
+		return content[:s] + block + content[e+len(end):]
+	}
+	return strings.TrimRight(content, "\n") + "\n\n" + block + "\n"
+}
+
+// forcedHostsBlock renders the managed [forced-hosts] table: players who
+// connect via <backend>.<domain> land directly on that backend.
+func forcedHostsBlock(domain string, backendIDs []string) string {
+	var b strings.Builder
+	b.WriteString(forcedBlockTop + "\n[forced-hosts]\n")
+	if domain != "" {
+		for _, id := range backendIDs {
+			b.WriteString(fmt.Sprintf("%q = [%q]\n", id+"."+domain, id))
+		}
+	}
+	b.WriteString(forcedBlockEnd)
+	return b.String()
+}
+
+// applyForcedHosts rewrites the managed [forced-hosts] block of one proxy's
+// velocity.toml. A non-empty warning means the file was left untouched.
+func applyForcedHosts(dataDir, domain string, backendIDs []string) (string, error) {
+	path := filepath.Join(dataDir, velocityConfig)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	content := string(raw)
+	if !strings.Contains(content, forcedBlockTop) && strings.Contains(content, "[forced-hosts]") {
+		return "velocity.toml contains a hand-written [forced-hosts] section, left untouched", nil
+	}
+	content = spliceBlock(content, forcedBlockTop, forcedBlockEnd, forcedHostsBlock(domain, backendIDs))
+	return "", fsutil.WriteFileAtomic(path, []byte(content), 0o644)
+}
+
+// rewriteAllForcedHosts refreshes the forced-hosts mapping of every proxy
+// after the base domain changed. Returns human readable warnings.
+func (m *Manager) rewriteAllForcedHosts(domain string) []string {
+	m.mu.Lock()
+	servers := make([]*Server, 0, len(m.items))
+	for _, s := range m.items {
+		servers = append(servers, s)
+	}
+	m.mu.Unlock()
+
+	warnings := []string{}
+	touched := false
+	for _, srv := range servers {
+		srv.mu.Lock()
+		typ, id := srv.meta.Type, srv.meta.ID
+		backends := append([]string{}, srv.meta.NetworkServers...)
+		srv.mu.Unlock()
+		if typ != TypeVelocity {
+			continue
+		}
+		w, err := applyForcedHosts(srv.DataDir(), domain, backends)
+		switch {
+		case err != nil:
+			warnings = append(warnings, id+": velocity.toml not updated: "+err.Error())
+		case w != "":
+			warnings = append(warnings, id+": "+w)
+		default:
+			touched = true
+		}
+	}
+	if touched {
+		warnings = append(warnings, "Restart the Velocity proxies so the new domain mapping takes effect.")
+	}
+	return warnings
 }
 
 type NetworkBackend struct {
@@ -64,6 +147,12 @@ type NetworkBackend struct {
 
 type NetworkInfo struct {
 	Backends []NetworkBackend `json:"backends"`
+	// Domain is the panel's base domain; linked backends are reachable at
+	// <id>.<Domain> via forced hosts. DNSManaged reports whether the panel
+	// also maintains SRV records, which makes the proxy port irrelevant.
+	Domain     string `json:"domain,omitempty"`
+	ProxyPort  int    `json:"proxyPort"`
+	DNSManaged bool   `json:"dnsManaged"`
 }
 
 // Network lists the Paper servers on this host and whether they are wired to
@@ -78,12 +167,19 @@ func (m *Manager) Network(id string) (NetworkInfo, error) {
 	}
 	linked := map[string]bool{}
 	srv.mu.Lock()
+	proxyPort := srv.meta.Port
 	for _, l := range srv.meta.NetworkServers {
 		linked[l] = true
 	}
 	srv.mu.Unlock()
 
-	info := NetworkInfo{Backends: []NetworkBackend{}}
+	st := m.Settings()
+	info := NetworkInfo{
+		Backends:   []NetworkBackend{},
+		Domain:     st.Domain,
+		ProxyPort:  proxyPort,
+		DNSManaged: dnsConfigured(st),
+	}
 	for _, v := range m.List() {
 		// Modern forwarding needs Paper; Vanilla and Bedrock cannot join a
 		// Velocity network this way.
@@ -156,20 +252,24 @@ func (m *Manager) SetNetwork(id string, serverIDs []string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read velocity.toml: %w", err)
 	}
-	content := string(raw)
-	start := strings.Index(content, serversBlockTop)
-	end := strings.Index(content, serversBlockEnd)
-	if start >= 0 && end > start {
-		content = content[:start] + block.String() + content[end+len(serversBlockEnd):]
-	} else {
-		// The markers were edited away; append a fresh managed block.
-		content = strings.TrimRight(content, "\n") + "\n\n" + block.String() + "\n"
-	}
+	content := spliceBlock(string(raw), serversBlockTop, serversBlockEnd, block.String())
 	if err := fsutil.WriteFileAtomic(tomlPath, []byte(content), 0o644); err != nil {
 		return nil, err
 	}
 
 	warnings := []string{}
+
+	// Keep the domain mapping in step: every linked backend gets a forced
+	// host <id>.<domain> so players land on the right server by hostname.
+	backendIDs := make([]string, 0, len(backends))
+	for _, b := range backends {
+		backendIDs = append(backendIDs, b.id)
+	}
+	if w, err := applyForcedHosts(srv.DataDir(), m.Settings().Domain, backendIDs); err != nil {
+		warnings = append(warnings, "forced hosts not updated: "+err.Error())
+	} else if w != "" {
+		warnings = append(warnings, w)
+	}
 	for _, b := range backends {
 		if err := patchPaperGlobal(b.srv.DataDir(), secret); err != nil {
 			warnings = append(warnings, fmt.Sprintf("%s: paper-global.yml not updated: %v", b.id, err))
@@ -181,16 +281,14 @@ func (m *Manager) SetNetwork(id string, serverIDs []string) ([]string, error) {
 	}
 
 	srv.mu.Lock()
-	ids := make([]string, 0, len(backends))
-	for _, b := range backends {
-		ids = append(ids, b.id)
-	}
-	srv.meta.NetworkServers = ids
+	srv.meta.NetworkServers = backendIDs
 	err = fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta)
 	srv.mu.Unlock()
 	if err != nil {
 		return warnings, err
 	}
+	// Proxy membership changes which port the backends' SRV records point at.
+	m.TriggerDNSSync("network changed")
 	return warnings, nil
 }
 

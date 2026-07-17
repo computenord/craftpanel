@@ -24,6 +24,18 @@ var backupNameRe = regexp.MustCompile(`^[a-z]+-[0-9]{8}-[0-9]{6}\.zip$`)
 // data directory.
 type PanelSettings struct {
 	BackupDir string `json:"backupDir,omitempty"`
+
+	// Domain is the base domain of the whitelabel mapping: every server is
+	// reachable as <id>.<Domain> once *.<Domain> points at this host.
+	Domain string `json:"domain,omitempty"`
+	// DNSProvider is empty (operator manages the wildcard record) or
+	// "cloudflare" (the panel maintains wildcard and SRV records itself).
+	DNSProvider string `json:"dnsProvider,omitempty"`
+	// DNSToken is the Cloudflare API token. It never leaves this host.
+	DNSToken string `json:"dnsToken,omitempty"`
+	// DNSTarget pins the wildcard record target; empty auto-detects the
+	// host's public IP and follows it like a DynDNS client.
+	DNSTarget string `json:"dnsTarget,omitempty"`
 }
 
 type BackupInfo struct {

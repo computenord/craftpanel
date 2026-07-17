@@ -30,23 +30,82 @@ func (h *Handler) username(r *http.Request) string {
 
 /* ---------- panel settings ---------- */
 
+// settingsDTO is the settings representation the UI works with. The DNS
+// token itself never leaves the host, only whether one is stored.
+type settingsDTO struct {
+	BackupDir   string       `json:"backupDir"`
+	Domain      string       `json:"domain"`
+	DNSProvider string       `json:"dnsProvider"`
+	DNSTarget   string       `json:"dnsTarget"`
+	DNSTokenSet bool         `json:"dnsTokenSet"`
+	DNS         mc.DNSStatus `json:"dns"`
+	Warnings    []string     `json:"warnings,omitempty"`
+}
+
+func (h *Handler) settingsDTO() settingsDTO {
+	st := h.Manager.Settings()
+	return settingsDTO{
+		BackupDir:   st.BackupDir,
+		Domain:      st.Domain,
+		DNSProvider: st.DNSProvider,
+		DNSTarget:   st.DNSTarget,
+		DNSTokenSet: st.DNSToken != "",
+		DNS:         h.Manager.DNSStatus(),
+	}
+}
+
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.Manager.Settings())
+	writeJSON(w, http.StatusOK, h.settingsDTO())
 }
 
 func (h *Handler) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BackupDir string `json:"backupDir"`
+		BackupDir   *string `json:"backupDir"`
+		Domain      *string `json:"domain"`
+		DNSProvider *string `json:"dnsProvider"`
+		DNSTarget   *string `json:"dnsTarget"`
+		DNSToken    *string `json:"dnsToken"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if err := h.Manager.SetBackupDir(req.BackupDir); err != nil {
-		apiError(w, http.StatusBadRequest, "bad_request", err.Error())
+	if req.BackupDir != nil {
+		if err := h.Manager.SetBackupDir(*req.BackupDir); err != nil {
+			apiError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		log.Printf("settings: backup dir set to %q", *req.BackupDir)
+	}
+	warnings := []string{}
+	if req.Domain != nil || req.DNSProvider != nil || req.DNSTarget != nil || req.DNSToken != nil {
+		w2, err := h.Manager.SetDomainSettings(mc.DomainRequest{
+			Domain: req.Domain, Provider: req.DNSProvider,
+			Target: req.DNSTarget, Token: req.DNSToken,
+		})
+		if err != nil {
+			apiError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		warnings = w2
+		st := h.Manager.Settings()
+		log.Printf("settings: domain %q, dns provider %q", st.Domain, st.DNSProvider)
+	}
+	dto := h.settingsDTO()
+	dto.Warnings = warnings
+	writeJSON(w, http.StatusOK, dto)
+}
+
+// dnsSync runs a DNS reconciliation right now, for the button in the panel
+// settings.
+func (h *Handler) dnsSync(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	status, err := h.Manager.RunDNSSync(ctx)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "dns_sync", err.Error())
 		return
 	}
-	log.Printf("settings: backup dir set to %q", req.BackupDir)
-	writeJSON(w, http.StatusOK, h.Manager.Settings())
+	writeJSON(w, http.StatusOK, status)
 }
 
 /* ---------- two-factor auth ---------- */

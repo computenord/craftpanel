@@ -73,6 +73,12 @@ type Instance struct {
 // ServerView is what the API returns: config plus runtime state.
 type ServerView struct {
 	Instance
+	// Domain is the public hostname under the panel's base domain, empty
+	// when no domain mapping is configured. DomainPort is the port players
+	// must append to it; 0 means none is needed (Java default port behind a
+	// proxy, or SRV records are managed).
+	Domain     string      `json:"domain,omitempty"`
+	DomainPort int         `json:"domainPort,omitempty"`
 	Status     string      `json:"status"`
 	Progress   float64     `json:"progress"`
 	Error      string      `json:"error,omitempty"`
@@ -127,6 +133,11 @@ type Manager struct {
 	settings     PanelSettings
 	items        map[string]*Server
 	versions     *Versions
+
+	dnsMu      sync.Mutex
+	dnsBusy    bool
+	dnsPending bool
+	dnsStatus  DNSStatus
 }
 
 func NewManager(dataDir string, versions *Versions) (*Manager, error) {
@@ -389,6 +400,10 @@ func (m *Manager) List() []ServerView {
 		out = append(out, s.view())
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	snap := m.domainSnapshot()
+	for i := range out {
+		decorateDomain(&out[i], snap)
+	}
 	return out
 }
 
@@ -397,7 +412,9 @@ func (m *Manager) View(id string) (ServerView, error) {
 	if err != nil {
 		return ServerView{}, err
 	}
-	return srv.view(), nil
+	v := srv.view()
+	decorateDomain(&v, m.domainSnapshot())
+	return v, nil
 }
 
 type CreateRequest struct {
@@ -494,7 +511,10 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 	m.startWatch(srv)
 	m.items[id] = srv
 	go m.runInstall(srv, meta.Version)
-	return srv.view(), nil
+	v := srv.view()
+	decorateDomain(&v, m.domainSnapshotLocked())
+	m.TriggerDNSSync("server created")
+	return v, nil
 }
 
 // RetryInstall restarts a failed jar download.
@@ -657,6 +677,7 @@ func (m *Manager) Delete(id string) error {
 		m.mu.Unlock()
 		return err
 	}
+	m.TriggerDNSSync("server deleted")
 	return nil
 }
 
@@ -760,7 +781,9 @@ func (m *Manager) Update(id string, req UpdateRequest) (ServerView, error) {
 	if err != nil {
 		return ServerView{}, err
 	}
-	return srv.view(), nil
+	v := srv.view()
+	decorateDomain(&v, m.domainSnapshot())
+	return v, nil
 }
 
 func (m *Manager) Start(id string) error {
