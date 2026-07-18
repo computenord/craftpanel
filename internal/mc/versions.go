@@ -39,6 +39,7 @@ const (
 	TypePaper    = "paper"
 	TypeBedrock  = "bedrock"
 	TypeVelocity = "velocity"
+	// Modded loader constants live in loaders.go (fabric, forge, neoforge, quilt).
 )
 
 var metaClient = &http.Client{Timeout: 30 * time.Second}
@@ -126,6 +127,14 @@ func (v *Versions) List(ctx context.Context, typ string) ([]VersionInfo, error) 
 		list, err = listFill(ctx, "velocity")
 	case TypeBedrock:
 		list, err = listBedrock(ctx)
+	case TypeFabric:
+		list, err = listFabricLike(ctx, fabricMetaBase)
+	case TypeQuilt:
+		list, err = listFabricLike(ctx, quiltMetaBase)
+	case TypeForge:
+		list, err = listForge(ctx)
+	case TypeNeoForge:
+		list, err = listNeoForge(ctx)
 	default:
 		return nil, fmt.Errorf("unknown server type %q", typ)
 	}

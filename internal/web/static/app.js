@@ -532,7 +532,10 @@ function updateServerCard(card, s) {
   if (badges.innerHTML !== badgeHTML) badges.innerHTML = badgeHTML;
 
   const meta = card.querySelector(".sc-meta");
-  const metaHTML = `<span>${esc(s.type)} <b>${esc(s.version)}</b></span>
+  const typeLabel = s.modpack && s.modpack.title
+    ? `${esc(s.modpack.title)} · ${esc(s.type)}`
+    : esc(s.type);
+  const metaHTML = `<span>${typeLabel} <b>${esc(s.version)}</b></span>
     ${s.domain ? `<span><b>${esc(s.domain + (s.domainPort ? ":" + s.domainPort : ""))}</b></span>`
       : `<span>${t("misc.port")} <b>${s.port}</b></span>`}
     ${s.javaMajor ? `<span>${esc(t("java.needs", { need: s.javaMajor }))}</span>` : ""}
@@ -595,6 +598,10 @@ async function serverAction(id, action) {
 
 const MEM_OPTIONS = [1024, 2048, 4096, 6144, 8192, 12288, 16384];
 
+function isModdedType(typ) {
+  return typ === "fabric" || typ === "forge" || typ === "neoforge" || typ === "quilt";
+}
+
 async function openCreateModal() {
   const box = el(`<div>
     <h2>${t("create.title")}</h2>
@@ -602,11 +609,34 @@ async function openCreateModal() {
       <label class="field"><span>${t("create.name")}</span><input type="text" name="name" maxlength="40" required></label>
       <div class="form-row">
         <label class="field"><span>${t("create.type")}</span>
-          <select name="type"><option value="paper">Paper</option><option value="vanilla">Vanilla</option><option value="bedrock">Bedrock</option><option value="velocity">Velocity (Proxy)</option></select>
+          <select name="type">
+            <option value="paper">Paper</option>
+            <option value="vanilla">Vanilla</option>
+            <option value="fabric">Fabric</option>
+            <option value="forge">Forge</option>
+            <option value="neoforge">NeoForge</option>
+            <option value="quilt">Quilt</option>
+            <option value="modpack">${t("create.typeModpack")}</option>
+            <option value="bedrock">Bedrock</option>
+            <option value="velocity">Velocity (Proxy)</option>
+          </select>
         </label>
-        <label class="field"><span>${t("create.version")}</span>
+        <label class="field" id="create-version-field"><span>${t("create.version")}</span>
           <select name="version" disabled><option>${t("create.loadingVersions")}</option></select>
         </label>
+      </div>
+      <div id="modpack-picker" hidden>
+        <label class="field"><span>${t("create.modpackSearch")}</span>
+          <div class="form-row">
+            <input type="text" id="mp-query" placeholder="${esc(t("create.modpackPlaceholder"))}">
+            <button type="button" class="btn btn-sm btn-primary" id="mp-search">${t("create.modpackSearchBtn")}</button>
+          </div>
+        </label>
+        <div id="mp-results" class="plg-results"></div>
+        <label class="field" id="mp-version-field" hidden><span>${t("create.modpackVersion")}</span>
+          <select id="mp-version"></select>
+        </label>
+        <input type="hidden" id="mp-project" value="">
       </div>
       <div class="form-row">
         <label class="field" id="create-mem"><span>${t("create.memory")}</span>
@@ -619,6 +649,8 @@ async function openCreateModal() {
       </div>
       <p class="hint" id="bedrock-hint" hidden>${t("create.bedrockHint")}</p>
       <p class="hint" id="velocity-hint" hidden>${t("create.velocityHint")}</p>
+      <p class="hint" id="modded-hint" hidden>${t("create.moddedHint")}</p>
+      <p class="hint" id="modpack-hint" hidden>${t("create.modpackHint")}</p>
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="create-cancel">${t("misc.cancel")}</button>
         <button type="submit" class="btn btn-primary" id="create-submit">${t("create.submit")}</button>
@@ -630,7 +662,13 @@ async function openCreateModal() {
 
   const typeSel = box.querySelector("select[name=type]");
   const verSel = box.querySelector("select[name=version]");
+  const memSel = box.querySelector("select[name=memoryMB]");
+  const mpProject = box.querySelector("#mp-project");
+  const mpVersion = box.querySelector("#mp-version");
+  const mpResults = box.querySelector("#mp-results");
+
   async function loadVersions() {
+    if (typeSel.value === "modpack") return;
     verSel.disabled = true;
     verSel.innerHTML = `<option>${t("create.loadingVersions")}</option>`;
     try {
@@ -643,13 +681,69 @@ async function openCreateModal() {
       toastError(e);
     }
   }
+
+  async function searchModpacks() {
+    const q = box.querySelector("#mp-query").value.trim();
+    mpResults.innerHTML = `<p class="hint">${t("misc.loading")}</p>`;
+    try {
+      const hits = await api(`/api/modpacks/search?q=${encodeURIComponent(q)}&sort=downloads`);
+      if (!hits.length) {
+        mpResults.innerHTML = `<p class="hint">${t("create.modpackNoResults")}</p>`;
+        return;
+      }
+      mpResults.innerHTML = "";
+      hits.forEach((hit) => {
+        const row = el(`<div class="plg-hit">
+          <div><strong>${esc(hit.title)}</strong>
+            <span class="plg-desc">${esc(hit.description || "")}</span>
+            <span class="plg-dl">${(hit.loaders || []).map(esc).join(", ")} · ${hit.downloads.toLocaleString()} ${t("plugins.downloads")}</span>
+          </div>
+          <button type="button" class="btn btn-sm">${t("create.modpackSelect")}</button>`);
+        row.querySelector("button").addEventListener("click", async () => {
+          mpProject.value = hit.projectId;
+          box.querySelector("#mp-version-field").hidden = false;
+          mpVersion.innerHTML = `<option>${t("create.loadingVersions")}</option>`;
+          try {
+            const vers = await api(`/api/modpacks/${encodeURIComponent(hit.projectId)}/versions`);
+            mpVersion.innerHTML = vers.map((v) =>
+              `<option value="${esc(v.id)}">${esc(v.name || v.versionNumber)} (${esc((v.gameVersions || []).join(", "))}${v.loaders && v.loaders.length ? " · " + esc(v.loaders.join(", ")) : ""})</option>`
+            ).join("");
+            toast(t("create.modpackSelected", { name: hit.title }), "ok");
+          } catch (e) {
+            toastError(e);
+          }
+        });
+        mpResults.appendChild(row);
+      });
+    } catch (e) {
+      mpResults.innerHTML = "";
+      toastError(e);
+    }
+  }
+
   const syncTypeUI = () => {
-    const bedrock = typeSel.value === "bedrock";
+    const typ = typeSel.value;
+    const bedrock = typ === "bedrock";
+    const modpack = typ === "modpack";
     box.querySelector("#create-mem").hidden = bedrock;
+    box.querySelector("#create-version-field").hidden = modpack;
+    box.querySelector("#modpack-picker").hidden = !modpack;
     box.querySelector("#bedrock-hint").hidden = !bedrock;
-    box.querySelector("#velocity-hint").hidden = typeSel.value !== "velocity";
+    box.querySelector("#velocity-hint").hidden = typ !== "velocity";
+    box.querySelector("#modded-hint").hidden = !isModdedType(typ);
+    box.querySelector("#modpack-hint").hidden = !modpack;
+    if (modpack && parseInt(memSel.value, 10) < 4096) memSel.value = "4096";
+    else if (isModdedType(typ) && parseInt(memSel.value, 10) < 2048) memSel.value = "2048";
   };
-  typeSel.addEventListener("change", () => { syncTypeUI(); loadVersions(); });
+  typeSel.addEventListener("change", () => {
+    syncTypeUI();
+    loadVersions();
+    if (typeSel.value === "modpack" && !mpResults.childElementCount) searchModpacks();
+  });
+  box.querySelector("#mp-search").addEventListener("click", searchModpacks);
+  box.querySelector("#mp-query").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); searchModpacks(); }
+  });
   syncTypeUI();
   loadVersions();
 
@@ -662,10 +756,18 @@ async function openCreateModal() {
       const body = {
         name: f.name.value.trim(),
         type: f.type.value,
-        version: f.version.value,
         memoryMB: parseInt(f.memoryMB.value, 10)
       };
       if (f.port.value) body.port = parseInt(f.port.value, 10);
+      if (f.type.value === "modpack") {
+        if (!mpProject.value || !mpVersion.value) {
+          throw Object.assign(new Error(t("create.modpackRequired")), { status: 400 });
+        }
+        body.modpackProject = mpProject.value;
+        body.modpackVersion = mpVersion.value;
+      } else {
+        body.version = f.version.value;
+      }
       const created = await api("/api/servers", { method: "POST", body });
       closeModal();
       location.hash = "#/server/" + encodeURIComponent(created.id);
@@ -696,6 +798,7 @@ async function renderDetail(id, tab) {
       ${s.type === "velocity" ? "" : `<button data-tab="players">${t("tabs.players")}</button>`}
       ${s.type === "velocity" ? `<button data-tab="network">${t("tabs.network")}</button>` : ""}
       ${s.type === "paper" || s.type === "velocity" ? `<button data-tab="plugins">${t("tabs.plugins")}</button>` : ""}
+      ${isModdedType(s.type) ? `<button data-tab="mods">${t("tabs.mods")}</button>` : ""}
       <button data-tab="files">${t("tabs.files")}</button>
       <button data-tab="backups">${t("tabs.backups")}</button>
       <button data-tab="settings">${t("tabs.settings")}</button>
@@ -713,6 +816,7 @@ async function renderDetail(id, tab) {
   else if (tab === "players" && s.type !== "velocity") renderPlayersTab(id);
   else if (tab === "network" && s.type === "velocity") renderNetworkTab(id);
   else if (tab === "plugins" && plugins) renderPluginsTab(id);
+  else if (tab === "mods" && isModdedType(s.type)) renderModsTab(id);
   else if (tab === "backups") renderBackupsTab(id);
   else if (tab === "settings") renderSettingsTab(id, s);
   else renderConsoleTab(id, s);
@@ -737,7 +841,7 @@ function renderDetailHead(s) {
       <div class="detail-actions" id="head-actions"></div>
     </div>
     <div class="detail-sub">
-      <span>${esc(s.type)} ${esc(s.version)}</span>
+      <span>${s.modpack && s.modpack.title ? `${esc(s.modpack.title)} · ` : ""}${esc(s.type)} ${esc(s.version)}${s.loaderVersion ? ` <span class="plg-desc">(${esc(s.loaderVersion)})</span>` : ""}</span>
       <span>${t("detail.address")} <code>${esc(addr)}</code>${s.type === "bedrock" ? " (UDP)" : ""}
         <button class="btn btn-ghost btn-sm" id="copy-addr" title="${t("detail.copy")}">${ICONS.copy}</button></span>
       ${s.status === "running" ? `<span>${t("detail.uptime")} ${fmtUptime(s.uptimeS)}</span>` : ""}
@@ -1425,6 +1529,168 @@ async function loadPluginList(id) {
   }
 }
 
+/* ---------- mods tab (fabric/forge/neoforge/quilt) ---------- */
+
+function renderModsTab(id) {
+  const body = document.getElementById("tab-body");
+  body.innerHTML = `
+    <div class="panel">
+      <h2>${t("mods.installed")}</h2>
+      <p class="hint">${t("mods.hint")}</p>
+      <div class="files-bar">
+        <button class="btn btn-sm btn-primary" id="mod-upload">${ICONS.upload} ${t("mods.upload")}</button>
+        <input type="file" id="mod-file" accept=".jar" multiple hidden>
+      </div>
+      <div id="mod-list">${t("misc.loading")}</div>
+    </div>
+    <div class="panel">
+      <h2>${t("mods.search")}</h2>
+      <div class="add-row">
+        <input type="text" id="mod-query" placeholder="${esc(t("mods.searchPlaceholder"))}">
+        <select id="mod-sort" class="plg-sort">
+          <option value="relevance">${t("plugins.sortRelevance")}</option>
+          <option value="downloads">${t("plugins.sortDownloads")}</option>
+          <option value="follows">${t("plugins.sortFollows")}</option>
+          <option value="newest">${t("plugins.sortNewest")}</option>
+          <option value="updated">${t("plugins.sortUpdated")}</option>
+        </select>
+        <button class="btn btn-sm btn-primary" id="mod-go">${t("mods.searchBtn")}</button>
+      </div>
+      <h3 class="sub" id="mod-results-head" hidden></h3>
+      <div id="mod-results"></div>
+    </div>`;
+
+  const fileInput = body.querySelector("#mod-file");
+  body.querySelector("#mod-upload").addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", async () => {
+    for (const file of fileInput.files) {
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(id)}/mods/upload`,
+          { method: "POST", headers: { "X-Craftpanel": "1" }, body: fd });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw Object.assign(new Error(data.message || res.statusText), { code: data.error });
+        }
+        toast(t("files.uploaded") + ": " + file.name, "ok");
+      } catch (e) { toastError(e); }
+    }
+    fileInput.value = "";
+    loadModList(id);
+  });
+
+  const doSearch = async () => {
+    const q = body.querySelector("#mod-query").value.trim();
+    const sort = body.querySelector("#mod-sort").value;
+    const host = body.querySelector("#mod-results");
+    const head = body.querySelector("#mod-results-head");
+    head.hidden = false;
+    head.textContent = q ? t("mods.results") : t("mods.popular");
+    host.innerHTML = `<p class="hint">${t("misc.loading")}</p>`;
+    let hits;
+    try {
+      hits = await api(`/api/servers/${encodeURIComponent(id)}/mods/search?q=${encodeURIComponent(q)}&sort=${encodeURIComponent(sort)}`);
+    } catch (e) { host.innerHTML = ""; toastError(e); return; }
+    if (hits.length === 0) {
+      host.innerHTML = `<p class="hint">${t("mods.noResults")}</p>`;
+      return;
+    }
+    host.innerHTML = `<ul class="plist"></ul>`;
+    const ul = host.querySelector("ul");
+    for (const hit of hits) {
+      const li = el(`<li class="plg-hit">
+        <span class="pname"><b>${esc(hit.title)}</b><span class="plg-desc">${esc(hit.description)}</span>
+          <span class="plg-dl">${hit.downloads.toLocaleString()} ${t("plugins.downloads")}</span></span>
+        <span class="pacts"></span>
+      </li>`);
+      const btn = el(`<button class="btn btn-sm ${hit.installed ? "" : "btn-ok"}" ${hit.installed ? "disabled" : ""}>
+        ${hit.installed ? t("mods.alreadyInstalled") : t("mods.install")}</button>`);
+      if (!hit.installed) {
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          btn.textContent = t("misc.loading");
+          try {
+            const entry = await api(`/api/servers/${encodeURIComponent(id)}/mods/install`,
+              { method: "POST", body: { projectId: hit.projectId } });
+            toast(t("mods.installedOk", { name: entry.title, v: entry.version }), "ok");
+            btn.textContent = t("mods.alreadyInstalled");
+            loadModList(id);
+          } catch (e) {
+            btn.disabled = false;
+            btn.textContent = t("mods.install");
+            toastError(e);
+          }
+        });
+      }
+      li.querySelector(".pacts").appendChild(btn);
+      ul.appendChild(li);
+    }
+  };
+  body.querySelector("#mod-go").addEventListener("click", doSearch);
+  body.querySelector("#mod-query").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); doSearch(); }
+  });
+  doSearch();
+  loadModList(id);
+}
+
+async function loadModList(id) {
+  const host = document.getElementById("mod-list");
+  if (!host) return;
+  let list;
+  try {
+    list = await api(`/api/servers/${encodeURIComponent(id)}/mods?check=1`);
+  } catch (e) {
+    host.innerHTML = "";
+    toastError(e);
+    return;
+  }
+  if (list.length === 0) {
+    host.innerHTML = `<p class="hint">${t("mods.none")}</p>`;
+    return;
+  }
+  host.innerHTML = `<ul class="plist"></ul>`;
+  const ul = host.querySelector("ul");
+  for (const p of list) {
+    const label = p.title ? `<b>${esc(p.title)}</b> <span class="plg-desc">${esc(p.file)}</span>` : esc(p.file);
+    const li = el(`<li>
+      <span class="pname">${label}
+        ${p.version ? `<span class="badge">${esc(p.version)}</span>` : `<span class="plg-desc">${t("mods.manual")}</span>`}
+        <span class="plg-dl">${fmtSize(p.size)}</span></span>
+      <span class="pacts"></span>
+    </li>`);
+    const acts = li.querySelector(".pacts");
+    if (p.updateAvailable) {
+      const up = el(`<button class="btn btn-sm btn-ok">${esc(t("mods.update", { v: p.newVersion }))}</button>`);
+      up.addEventListener("click", async () => {
+        up.disabled = true;
+        up.textContent = t("misc.loading");
+        try {
+          await api(`/api/servers/${encodeURIComponent(id)}/mods/install`,
+            { method: "POST", body: { projectId: p.projectId } });
+          toast(t("mods.installedOk", { name: p.title, v: p.newVersion }), "ok");
+          loadModList(id);
+        } catch (e) {
+          up.disabled = false;
+          toastError(e);
+        }
+      });
+      acts.appendChild(up);
+    }
+    const del = el(`<button class="btn btn-sm btn-danger">${t("files.delete")}</button>`);
+    del.addEventListener("click", async () => {
+      if (!(await confirmModal(t("mods.deleteConfirm", { name: p.title || p.file }), true))) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/mods?file=${encodeURIComponent(p.file)}`, { method: "DELETE" });
+        loadModList(id);
+      } catch (e) { toastError(e); }
+    });
+    acts.appendChild(del);
+    ul.appendChild(li);
+  }
+}
+
 /* ---------- backups tab ---------- */
 
 async function renderBackupsTab(id) {
@@ -1600,7 +1866,18 @@ async function renderSettingsTab(id, s) {
       </form>
     </div>
 
-    <div class="panel">
+    ${s.modpack ? `<div class="panel">
+      <h2>${t("modpack.infoTitle")}</h2>
+      <p class="hint">${t("modpack.infoHint")}</p>
+      <p><b>${esc(s.modpack.title || s.modpack.slug || "")}</b>
+        ${s.modpack.version ? `<span class="badge">${esc(s.modpack.version)}</span>` : ""}</p>
+      <p class="hint">${esc(s.type)} ${esc(s.version)}${s.loaderVersion ? " · loader " + esc(s.loaderVersion) : ""}</p>
+      <div class="form-row">
+        <label class="field"><span>${t("modpack.changeVersion")}</span>
+          <select id="mp-up-version"><option>${t("create.loadingVersions")}</option></select></label>
+      </div>
+      <button class="btn" id="mp-up-btn">${ICONS.restart} ${t("modpack.upgrade")}</button>
+    </div>` : `<div class="panel">
       <h2>${t("upgrade.title")}</h2>
       <p class="hint">${t("upgrade.hint")}</p>
       <div class="form-row">
@@ -1608,7 +1885,7 @@ async function renderSettingsTab(id, s) {
           <select id="up-version"><option>${t("create.loadingVersions")}</option></select></label>
       </div>
       <button class="btn" id="up-btn">${ICONS.restart} ${t("upgrade.button")}</button>
-    </div>
+    </div>`}
 
     ${s.type === "velocity" ? "" : `<div class="panel">
       <h2>${t("access.title")}</h2>
@@ -1691,26 +1968,50 @@ async function renderSettingsTab(id, s) {
     } catch (e) { toastError(e); }
   });
 
-  (async () => {
-    const sel = body.querySelector("#up-version");
-    try {
-      const list = await api("/api/versions?type=" + s.type);
-      sel.innerHTML = list.map((v) =>
-        `<option value="${esc(v.id)}" ${v.id === s.version ? "selected" : ""}>${esc(v.id)}${v.latest ? " (latest)" : ""}</option>`).join("");
-    } catch {
-      sel.innerHTML = "<option></option>";
-    }
-  })();
-  body.querySelector("#up-btn").addEventListener("click", async () => {
-    const v = body.querySelector("#up-version").value;
-    if (!v || v === s.version) return;
-    if (!(await confirmModal(t("upgrade.confirm", { version: v }), false))) return;
-    try {
-      await api(`/api/servers/${encodeURIComponent(id)}/upgrade`, { method: "POST", body: { version: v } });
-      toast(t("upgrade.started"), "ok");
-      updateDetailHead(id);
-    } catch (e) { toastError(e); }
-  });
+  if (s.modpack) {
+    (async () => {
+      const sel = body.querySelector("#mp-up-version");
+      try {
+        const list = await api(`/api/modpacks/${encodeURIComponent(s.modpack.projectId)}/versions`);
+        sel.innerHTML = list.map((v) =>
+          `<option value="${esc(v.id)}" ${v.id === s.modpack.versionId ? "selected" : ""}>${esc(v.name || v.versionNumber)} (${esc((v.gameVersions || []).join(", "))}${v.loaders && v.loaders.length ? " · " + esc(v.loaders.join(", ")) : ""})</option>`
+        ).join("");
+      } catch {
+        sel.innerHTML = "<option></option>";
+      }
+    })();
+    body.querySelector("#mp-up-btn").addEventListener("click", async () => {
+      const v = body.querySelector("#mp-up-version").value;
+      if (!v || v === s.modpack.versionId) return;
+      if (!(await confirmModal(t("modpack.upgradeConfirm"), false))) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/modpack/upgrade`, { method: "POST", body: { versionId: v } });
+        toast(t("modpack.upgradeStarted"), "ok");
+        updateDetailHead(id);
+      } catch (e) { toastError(e); }
+    });
+  } else {
+    (async () => {
+      const sel = body.querySelector("#up-version");
+      try {
+        const list = await api("/api/versions?type=" + s.type);
+        sel.innerHTML = list.map((v) =>
+          `<option value="${esc(v.id)}" ${v.id === s.version ? "selected" : ""}>${esc(v.id)}${v.latest ? " (latest)" : ""}</option>`).join("");
+      } catch {
+        sel.innerHTML = "<option></option>";
+      }
+    })();
+    body.querySelector("#up-btn").addEventListener("click", async () => {
+      const v = body.querySelector("#up-version").value;
+      if (!v || v === s.version) return;
+      if (!(await confirmModal(t("upgrade.confirm", { version: v }), false))) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/upgrade`, { method: "POST", body: { version: v } });
+        toast(t("upgrade.started"), "ok");
+        updateDetailHead(id);
+      } catch (e) { toastError(e); }
+    });
+  }
 
   const rsForm = body.querySelector("#rs-form");
   rsForm.addEventListener("submit", async (e) => {

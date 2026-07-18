@@ -44,7 +44,7 @@ var (
 type Instance struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
-	Type      string    `json:"type"` // vanilla | paper
+	Type      string    `json:"type"` // vanilla | paper | fabric | forge | neoforge | quilt | bedrock | velocity
 	Version   string    `json:"version"`
 	Port      int       `json:"port"`
 	MemoryMB  int       `json:"memoryMB"`
@@ -54,6 +54,13 @@ type Instance struct {
 	// JavaMajor is the Java version this Minecraft release requires, as
 	// declared by Mojang. 0 means unknown, in which case no check is enforced.
 	JavaMajor int `json:"javaMajor,omitempty"`
+
+	// LoaderVersion is the Fabric/Forge/NeoForge/Quilt loader build installed
+	// alongside Version (the Minecraft release). Empty for non-modded servers.
+	LoaderVersion string `json:"loaderVersion,omitempty"`
+
+	// Modpack is set when the server was created from a Modrinth modpack.
+	Modpack *ModpackRef `json:"modpack,omitempty"`
 
 	RestartOnCrash bool   `json:"restartOnCrash"`
 	BackupAuto     bool   `json:"backupAuto"`
@@ -272,11 +279,14 @@ func (s *Server) DataDir() string { return filepath.Join(s.dir, dataSubdir) }
 
 // binaryExists reports whether the server's executable payload is installed.
 func (s *Server) binaryExists() bool {
-	name := jarName
 	if s.meta.Type == TypeBedrock {
-		name = BedrockBinaryName()
+		_, err := os.Stat(filepath.Join(s.DataDir(), BedrockBinaryName()))
+		return err == nil
 	}
-	_, err := os.Stat(filepath.Join(s.DataDir(), name))
+	if IsModded(s.meta.Type) {
+		return loaderBinaryExists(s.DataDir(), s.meta.Type, s.meta.Version, s.meta.LoaderVersion)
+	}
+	_, err := os.Stat(filepath.Join(s.DataDir(), jarName))
 	return err == nil
 }
 
@@ -423,6 +433,10 @@ type CreateRequest struct {
 	Version  string `json:"version"`
 	MemoryMB int    `json:"memoryMB"`
 	Port     int    `json:"port"`
+	// ModpackProject / ModpackVersion select a Modrinth modpack when Type is
+	// "modpack". Version may be empty in that case.
+	ModpackProject string `json:"modpackProject,omitempty"`
+	ModpackVersion string `json:"modpackVersion,omitempty"`
 }
 
 func (m *Manager) Create(req CreateRequest) (ServerView, error) {
@@ -430,9 +444,29 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 	if name == "" || len(name) > nameMaxLength {
 		return ServerView{}, fmt.Errorf("name must be 1-%d characters", nameMaxLength)
 	}
-	if req.Type != TypeVanilla && req.Type != TypePaper && req.Type != TypeBedrock && req.Type != TypeVelocity {
-		return ServerView{}, errors.New("type must be vanilla, paper, bedrock or velocity")
+	if !validServerType(req.Type) {
+		return ServerView{}, errors.New("type must be vanilla, paper, fabric, forge, neoforge, quilt, modpack, bedrock or velocity")
 	}
+
+	var pack *resolvedModpack
+	if req.Type == TypeModpack {
+		if strings.TrimSpace(req.ModpackProject) == "" {
+			return ServerView{}, errors.New("modpackProject is required for modpack servers")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resolved, err := resolveModpack(ctx, req.ModpackProject, req.ModpackVersion)
+		cancel()
+		if err != nil {
+			return ServerView{}, err
+		}
+		pack = &resolved
+		req.Type = resolved.LoaderType
+		req.Version = resolved.Minecraft
+		if req.MemoryMB == 0 {
+			req.MemoryMB = 4096 // modpacks are hungrier than vanilla
+		}
+	}
+
 	if req.Version == "" {
 		return ServerView{}, errors.New("version is required")
 	}
@@ -464,6 +498,9 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return ServerView{}, err
 	}
+	if IsModded(req.Type) {
+		_ = os.MkdirAll(filepath.Join(dataDir, "mods"), 0o750)
+	}
 
 	meta := Instance{
 		ID:        id,
@@ -473,6 +510,10 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 		Port:      req.Port,
 		MemoryMB:  req.MemoryMB,
 		CreatedAt: time.Now().UTC(),
+	}
+	if pack != nil {
+		ref := pack.Ref
+		meta.Modpack = &ref
 	}
 
 	// Bedrock has no eula.txt mechanism, the panel still keeps one as its own
@@ -557,6 +598,10 @@ func (m *Manager) Upgrade(id, version string) error {
 		return errors.New("version is required")
 	}
 	srv.mu.Lock()
+	if srv.meta.Modpack != nil {
+		srv.mu.Unlock()
+		return errors.New("use modpack upgrade to change the pack version")
+	}
 	if srv.installing {
 		srv.mu.Unlock()
 		return errors.New("installation already in progress")
@@ -564,6 +609,10 @@ func (m *Manager) Upgrade(id, version string) error {
 	if srv.deleting || srv.backupBusy || srv.proc.State() != StateStopped {
 		srv.mu.Unlock()
 		return ErrNotStopped
+	}
+	// Pick a fresh loader build for the new Minecraft release.
+	if IsModded(srv.meta.Type) && srv.meta.Version != version {
+		srv.meta.LoaderVersion = ""
 	}
 	srv.installing = true
 	srv.installErr = ""
@@ -573,15 +622,68 @@ func (m *Manager) Upgrade(id, version string) error {
 	return nil
 }
 
-// runInstall downloads the server jar for targetVersion and, on success,
-// persists the (possibly changed) version and its Java requirement.
+// UpgradeModpack switches a Modrinth modpack server to another pack version.
+// The world is kept; mods and pack overrides are replaced.
+func (m *Manager) UpgradeModpack(id, versionID string) error {
+	srv, err := m.get(id)
+	if err != nil {
+		return err
+	}
+	versionID = strings.TrimSpace(versionID)
+	if versionID == "" {
+		return errors.New("modpack version is required")
+	}
+	srv.mu.Lock()
+	if srv.meta.Modpack == nil || srv.meta.Modpack.ProjectID == "" {
+		srv.mu.Unlock()
+		return errors.New("server was not created from a modpack")
+	}
+	if srv.meta.Modpack.VersionID == versionID {
+		srv.mu.Unlock()
+		return errors.New("server is already on this modpack version")
+	}
+	if srv.installing {
+		srv.mu.Unlock()
+		return errors.New("installation already in progress")
+	}
+	if srv.deleting || srv.backupBusy || srv.proc.State() != StateStopped {
+		srv.mu.Unlock()
+		return ErrNotStopped
+	}
+	srv.meta.Modpack.VersionID = versionID
+	srv.meta.LoaderVersion = ""
+	if werr := fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta); werr != nil {
+		srv.mu.Unlock()
+		return werr
+	}
+	version := srv.meta.Version
+	srv.installing = true
+	srv.installErr = ""
+	srv.installProgress = 0
+	srv.mu.Unlock()
+	go m.runInstall(srv, version)
+	return nil
+}
+
+// runInstall downloads the server jar (or installer payload) for targetVersion
+// and, on success, persists the (possibly changed) version and its Java requirement.
 func (m *Manager) runInstall(srv *Server, targetVersion string) {
 	srv.mu.Lock()
 	typ := srv.meta.Type
 	version := targetVersion
+	loaderVersion := srv.meta.LoaderVersion
+	javaPath := srv.meta.JavaPath
+	var modpack *ModpackRef
+	if srv.meta.Modpack != nil {
+		cp := *srv.meta.Modpack
+		modpack = &cp
+	}
 	srv.mu.Unlock()
+	if javaPath == "" {
+		javaPath = "java"
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Minute)
 	defer cancel()
 	progress := func(done, total int64) {
 		if total <= 0 {
@@ -594,25 +696,47 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 
 	var err error
 	javaMajor := 0
-	if typ == TypeBedrock {
+	switch {
+	case typ == TypeBedrock:
 		var installed string
 		installed, err = m.versions.InstallBedrock(ctx, srv.DataDir(), progress)
 		if err == nil {
 			version = installed
 		}
-	} else {
+	case modpack != nil && modpack.ProjectID != "":
+		var pack resolvedModpack
+		pack, err = resolveModpack(ctx, modpack.ProjectID, modpack.VersionID)
+		if err == nil {
+			version, loaderVersion, err = m.installModpack(ctx, srv, pack, javaPath, progress)
+			if err == nil {
+				typ = pack.LoaderType
+				ref := pack.Ref
+				srv.mu.Lock()
+				srv.meta.Type = typ
+				srv.meta.Modpack = &ref
+				srv.mu.Unlock()
+			}
+		}
+	case IsModded(typ):
+		var res InstallLoaderResult
+		res, err = m.versions.InstallLoader(ctx, typ, version, loaderVersion, javaPath, srv.DataDir(), progress)
+		if err == nil {
+			loaderVersion = res.LoaderVersion
+		}
+	default:
 		dest := filepath.Join(srv.DataDir(), jarName)
 		err = m.versions.DownloadServerJar(ctx, typ, version, dest, progress)
-		// Record the Java requirement while we are online anyway, so a later
-		// start can fail fast instead of dying with a JVM exit status.
-		if err == nil {
-			if typ == TypeVelocity {
-				javaMajor = 17 // Velocity 3.x baseline
-			} else if major, jerr := m.versions.JavaMajor(ctx, version); jerr == nil {
-				javaMajor = major
-			} else {
-				log.Printf("install %s: java requirement lookup failed: %v", srv.meta.ID, jerr)
-			}
+	}
+
+	// Record the Java requirement while we are online anyway, so a later
+	// start can fail fast instead of dying with a JVM exit status.
+	if err == nil && typ != TypeBedrock {
+		if typ == TypeVelocity {
+			javaMajor = 17 // Velocity 3.x baseline
+		} else if major, jerr := m.versions.JavaMajor(ctx, version); jerr == nil {
+			javaMajor = major
+		} else {
+			log.Printf("install %s: java requirement lookup failed: %v", srv.meta.ID, jerr)
 		}
 	}
 
@@ -627,8 +751,16 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 	srv.installErr = ""
 	srv.installProgress = 1
 	changed := false
+	if srv.meta.Type != typ {
+		srv.meta.Type = typ
+		changed = true
+	}
 	if srv.meta.Version != version {
 		srv.meta.Version = version
+		changed = true
+	}
+	if srv.meta.LoaderVersion != loaderVersion {
+		srv.meta.LoaderVersion = loaderVersion
 		changed = true
 	}
 	if javaMajor > 0 && srv.meta.JavaMajor != javaMajor {
@@ -640,7 +772,7 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 			log.Printf("install %s: persist meta: %v", srv.meta.ID, werr)
 		}
 	}
-	log.Printf("install %s: downloaded %s %s (needs java %d)", srv.meta.ID, typ, version, javaMajor)
+	log.Printf("install %s: installed %s %s (loader %s, needs java %d)", srv.meta.ID, typ, version, loaderVersion, javaMajor)
 }
 
 // Delete removes a stopped server. The directory removal happens outside both
@@ -850,14 +982,21 @@ func (s *Server) start() error {
 		"-Dfile.encoding=UTF-8",
 		// Defense in depth for pre-1.18.1 servers (Log4Shell).
 		"-Dlog4j2.formatMsgNoLookups=true",
-		"-jar", jarName,
 	}
 	stopCmd := "stop"
-	if s.meta.Type == TypeVelocity {
+	switch {
+	case s.meta.Type == TypeVelocity:
 		// Velocity neither knows "nogui" nor "stop".
+		args = append(args, "-jar", jarName)
 		stopCmd = "shutdown"
-	} else {
-		args = append(args, "nogui")
+	case IsModded(s.meta.Type):
+		launch, err := loaderLaunchArgs(s.DataDir(), s.meta.Type, s.meta.Version, s.meta.LoaderVersion)
+		if err != nil {
+			return err
+		}
+		args = append(args, launch...)
+	default:
+		args = append(args, "-jar", jarName, "nogui")
 	}
 	s.proc.SetStopCommand(stopCmd)
 	return s.proc.Start(javaPath, args, nil, "]: Done (")
