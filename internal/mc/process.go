@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -65,6 +66,12 @@ type Proc struct {
 	ringNext  int
 	ringCount int
 	subs      map[chan Event]struct{}
+
+	// Active quiet query: the first stdout line matching quietRe is routed to
+	// quietCh instead of the visible console (see QueryQuiet).
+	quietRe    *regexp.Regexp
+	quietCh    chan string
+	quietUntil time.Time
 
 	// Isolation mode for the next Start (Linux): "", "systemd", "docker".
 	isolation string
@@ -172,6 +179,42 @@ func (p *Proc) SendCommandQuiet(command string) error {
 	return p.send(command, false)
 }
 
+// QueryQuiet sends a command without echo and captures the first console line
+// matching re, keeping that line out of the visible console stream. Only one
+// quiet query may be in flight at a time; overlapping calls fail fast.
+func (p *Proc) QueryQuiet(command string, re *regexp.Regexp, timeout time.Duration) (string, error) {
+	ch := make(chan string, 1)
+	p.mu.Lock()
+	if p.quietRe != nil && time.Now().Before(p.quietUntil) {
+		p.mu.Unlock()
+		return "", errors.New("quiet query already in flight")
+	}
+	p.quietRe = re
+	p.quietCh = ch
+	p.quietUntil = time.Now().Add(timeout)
+	p.mu.Unlock()
+
+	clear := func() {
+		p.mu.Lock()
+		if p.quietCh == ch {
+			p.quietRe = nil
+			p.quietCh = nil
+		}
+		p.mu.Unlock()
+	}
+	if err := p.send(command, false); err != nil {
+		clear()
+		return "", err
+	}
+	select {
+	case line := <-ch:
+		return line, nil
+	case <-time.After(timeout):
+		clear()
+		return "", errors.New("no response")
+	}
+}
+
 func (p *Proc) send(command string, echo bool) error {
 	command = strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(command, "\r", " "), "\n", " "))
 	if command == "" {
@@ -276,8 +319,21 @@ func (p *Proc) historyLocked() []string {
 }
 
 // emitLine feeds one console line into the ring buffer and checks readiness.
+// A line claimed by an active quiet query (QueryQuiet) is diverted to the
+// querier and never reaches the visible console.
 func (p *Proc) emitLine(line string) {
 	p.mu.Lock()
+	if p.quietRe != nil && time.Now().Before(p.quietUntil) && p.quietRe.MatchString(line) {
+		ch := p.quietCh
+		p.quietRe = nil
+		p.quietCh = nil
+		p.mu.Unlock()
+		select {
+		case ch <- line:
+		default:
+		}
+		return
+	}
 	p.appendLineLocked(line)
 	if p.state == StateStarting && p.readyMarker != "" && strings.Contains(line, p.readyMarker) {
 		p.setStateLocked(StateRunning)

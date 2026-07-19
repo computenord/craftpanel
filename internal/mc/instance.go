@@ -113,6 +113,7 @@ type ServerView struct {
 	UptimeS    int64       `json:"uptimeS"`
 	EULA       bool        `json:"eula"`
 	Players    *PingResult `json:"players,omitempty"`
+	TPS        float64     `json:"tps,omitempty"`
 	CPUPct     float64     `json:"cpuPct"`
 	RSSMB      int         `json:"rssMB"`
 	DiskMB     int64       `json:"diskMB"`
@@ -144,6 +145,10 @@ type Server struct {
 	lastPing *PingResult
 	pingAt   time.Time
 	pingBusy bool
+
+	tps     float64
+	tpsAt   time.Time
+	tpsBusy bool
 
 	players   *PlayersInfo
 	playersAt time.Time
@@ -340,6 +345,9 @@ func (s *Server) view() ServerView {
 	}
 	if v.Status == StateRunning {
 		v.Players = s.cachedPingLocked()
+		if SupportsTPS(s.meta.Type) {
+			v.TPS = s.cachedTPSLocked()
+		}
 	}
 	v.DiskMB = s.cachedDiskLocked()
 	return v

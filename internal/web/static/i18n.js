@@ -520,7 +520,71 @@ const STRINGS = {
     "misc.version": "Version",
     "misc.confirmStop": "Stop this server?",
     "misc.confirmKill": "Force stop this server? Unsaved world data may be lost.",
-    "misc.confirmRestart": "Restart this server?"
+    "misc.confirmRestart": "Restart this server?",
+
+    "search.placeholder": "Search settings & servers…",
+    "search.noResults": "No results",
+
+    "nav.server": "Servers",
+    "nav.panel": "Panel",
+    "nav.admin": "Admin",
+    "nav.dashboard": "Dashboard",
+
+    "panel.nav.general": "General",
+    "panel.nav.backups": "Backups",
+    "panel.nav.sftp": "SFTP",
+    "panel.nav.domain": "Domain & DNS",
+    "panel.nav.integrations": "Integrations",
+    "admin.nav.users": "Users",
+    "admin.nav.nodes": "Nodes",
+    "admin.nav.audit": "Audit log",
+    "admin.nav.templates": "Templates",
+    "admin.nav.java": "Java runtimes",
+
+    "account.title": "Personal",
+
+    "dash.sum": "{total} total · {running} running · {players} players online",
+    "dash.viewCards": "Cards",
+    "dash.viewList": "List",
+
+    "tabs.metrics": "Metrics",
+    "subnav.ops": "Operations",
+    "subnav.content": "Content",
+
+    "set.general": "General",
+    "set.automation": "Automation",
+    "set.integrations": "Integrations",
+    "set.world": "World",
+    "set.danger": "Danger Zone",
+
+    "console.chip.all": "All",
+    "console.chip.warn": "Warnings",
+    "console.chip.err": "Errors",
+    "console.chip.chat": "Chat",
+    "console.histHint": "↑ history",
+
+    "audit.time": "Time",
+    "audit.actor": "User",
+    "audit.action": "Action",
+    "audit.detail": "Detail",
+
+    "wiz.step": "Step {n} of 4",
+    "wiz.s1": "Source",
+    "wiz.s2": "Type & version",
+    "wiz.s3": "Resources",
+    "wiz.s4": "Confirm",
+    "wiz.back": "Back",
+    "wiz.next": "Next",
+    "wiz.src.empty": "Empty server",
+    "wiz.src.emptyDesc": "vanilla · paper · purpur · folia · fabric · forge · neoforge · quilt · bedrock · proxy",
+    "wiz.src.modpack": "From modpack",
+    "wiz.src.modpackDesc": "Modrinth/CurseForge search with suitability analysis and RAM recommendation",
+    "wiz.src.template": "From template",
+    "wiz.src.templateDesc": "Panel templates created by the admin",
+    "wiz.src.clone": "Clone",
+    "wiz.src.cloneDesc": "Duplicate an existing server",
+    "wiz.src.import": "Import",
+    "wiz.src.importDesc": "Existing server directory or archive as zip"
   },
   de: {
     "app.tagline": "Selbst gehostetes Minecraft Management von ComputeBox",
@@ -1040,7 +1104,71 @@ const STRINGS = {
     "misc.version": "Version",
     "misc.confirmStop": "Diesen Server stoppen?",
     "misc.confirmKill": "Diesen Server sofort beenden? Nicht gespeicherte Weltdaten können verloren gehen.",
-    "misc.confirmRestart": "Diesen Server neu starten?"
+    "misc.confirmRestart": "Diesen Server neu starten?",
+
+    "search.placeholder": "Einstellungen & Server durchsuchen…",
+    "search.noResults": "Keine Treffer",
+
+    "nav.server": "Server",
+    "nav.panel": "Panel",
+    "nav.admin": "Admin",
+    "nav.dashboard": "Dashboard",
+
+    "panel.nav.general": "Allgemein",
+    "panel.nav.backups": "Backups",
+    "panel.nav.sftp": "SFTP",
+    "panel.nav.domain": "Domain & DNS",
+    "panel.nav.integrations": "Integrationen",
+    "admin.nav.users": "Benutzer",
+    "admin.nav.nodes": "Nodes",
+    "admin.nav.audit": "Audit-Log",
+    "admin.nav.templates": "Templates",
+    "admin.nav.java": "Java-Runtimes",
+
+    "account.title": "Persönlich",
+
+    "dash.sum": "{total} gesamt · {running} laufen · {players} Spieler online",
+    "dash.viewCards": "Karten",
+    "dash.viewList": "Liste",
+
+    "tabs.metrics": "Metriken",
+    "subnav.ops": "Betrieb",
+    "subnav.content": "Inhalte",
+
+    "set.general": "Allgemein",
+    "set.automation": "Automatisierung",
+    "set.integrations": "Integrationen",
+    "set.world": "Welt",
+    "set.danger": "Danger Zone",
+
+    "console.chip.all": "Alles",
+    "console.chip.warn": "Warnungen",
+    "console.chip.err": "Fehler",
+    "console.chip.chat": "Chat",
+    "console.histHint": "↑ Historie",
+
+    "audit.time": "Zeit",
+    "audit.actor": "Benutzer",
+    "audit.action": "Aktion",
+    "audit.detail": "Detail",
+
+    "wiz.step": "Schritt {n} von 4",
+    "wiz.s1": "Quelle",
+    "wiz.s2": "Typ & Version",
+    "wiz.s3": "Ressourcen",
+    "wiz.s4": "Bestätigen",
+    "wiz.back": "Zurück",
+    "wiz.next": "Weiter",
+    "wiz.src.empty": "Leerer Server",
+    "wiz.src.emptyDesc": "vanilla · paper · purpur · folia · fabric · forge · neoforge · quilt · bedrock · proxy",
+    "wiz.src.modpack": "Aus Modpack",
+    "wiz.src.modpackDesc": "Modrinth/CurseForge-Suche mit Eignungsanalyse und RAM-Empfehlung",
+    "wiz.src.template": "Aus Template",
+    "wiz.src.templateDesc": "Panel-Templates des Admins",
+    "wiz.src.clone": "Klonen",
+    "wiz.src.cloneDesc": "Bestehenden Server duplizieren",
+    "wiz.src.import": "Import",
+    "wiz.src.importDesc": "Vorhandenes Server-Verzeichnis / Archiv als Zip"
   }
 };
 
