@@ -2929,6 +2929,7 @@ async function renderSettingsTab(id, s, sub) {
     </div>` : `<div class="panel" data-sub="general">
       <h2>${t("upgrade.title")}</h2>
       <p class="hint">${t("upgrade.hint")}</p>
+      <div id="build-line"></div>
       <div class="form-row">
         <label class="field"><span>${t("create.version")}</span>
           <select id="up-version"><option>${t("create.loadingVersions")}</option></select></label>
@@ -3125,6 +3126,38 @@ async function renderSettingsTab(id, s, sub) {
         updateDetailHead(id);
       } catch (e) { toastError(e); }
     });
+
+    // Jar build updates within the installed version (Paper family, Purpur):
+    // "you are N builds behind" without having to read the server log.
+    (async () => {
+      const line = body.querySelector("#build-line");
+      if (!line) return;
+      let info;
+      try {
+        info = await api(`/api/servers/${encodeURIComponent(id)}/build-update`);
+      } catch { return; }
+      if (!info.supported) return;
+      const cur = `${esc(s.type)} ${esc(s.version)}${info.build ? " · Build " + esc(info.build) : ""}`;
+      const upToDate = !info.updateAvailable && info.latest && info.build;
+      let html = `<p class="hint" style="font-family:var(--font-mono);font-size:11.5px">${cur}${upToDate ? ` <span style="color:var(--ok)">✓ ${t("build.upToDate")}</span>` : ""}</p>`;
+      if (info.updateAvailable || (!info.build && info.latest)) {
+        html = `<div class="notice">&#9888; ${esc(info.build
+          ? t("build.available", { latest: info.latest, current: info.build })
+          : t("build.availableUnknown", { latest: info.latest }))}
+          <span style="flex:1"></span>
+          <button class="btn btn-sm btn-primary" id="build-upd">${t("build.update")}</button></div>` + html;
+      }
+      line.innerHTML = html;
+      const btn = line.querySelector("#build-upd");
+      if (btn) btn.addEventListener("click", async () => {
+        if (!(await confirmModal(t("build.confirm", { version: s.version }), false))) return;
+        try {
+          await api(`/api/servers/${encodeURIComponent(id)}/upgrade`, { method: "POST", body: { version: s.version } });
+          toast(t("upgrade.started"), "ok");
+          updateDetailHead(id);
+        } catch (e) { toastError(e); }
+      });
+    })();
   }
 
   const rsForm = body.querySelector("#rs-form");

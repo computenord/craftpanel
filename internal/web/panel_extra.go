@@ -336,6 +336,24 @@ func (h *Handler) geyserInstall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, st)
 }
 
+/* ---------- jar build updates ---------- */
+
+// buildUpdate reports whether a newer jar build of the installed Minecraft
+// version is available upstream (Paper family, Purpur). Applying it is a
+// plain upgrade to the same version.
+func (h *Handler) buildUpdate(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if _, ok := h.requireServerPerm(w, r, id, auth.PermView); !ok {
+		return
+	}
+	info, err := h.Manager.BuildUpdate(r.Context(), id)
+	if err != nil {
+		managerError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
 /* ---------- metrics ---------- */
 
 func (h *Handler) serverMetrics(w http.ResponseWriter, r *http.Request) {

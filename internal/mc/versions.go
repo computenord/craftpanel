@@ -154,37 +154,71 @@ func (v *Versions) List(ctx context.Context, typ string) ([]VersionInfo, error) 
 }
 
 // DownloadServerJar fetches the server jar for typ/version to destPath,
-// verifying the upstream checksum. progress may be nil.
-func (v *Versions) DownloadServerJar(ctx context.Context, typ, version, destPath string, progress func(done, total int64)) error {
-	var url, algo, sum string
+// verifying the upstream checksum. It returns the upstream build identifier
+// for types with a build channel (Paper family, Purpur), "" otherwise.
+// progress may be nil.
+func (v *Versions) DownloadServerJar(ctx context.Context, typ, version, destPath string, progress func(done, total int64)) (string, error) {
+	var url, algo, sum, build string
 	var err error
 	switch typ {
 	case TypeVanilla:
 		url, sum, err = resolveVanilla(ctx, version)
 		algo = "sha1"
 	case TypePaper:
-		url, sum, err = resolveFill(ctx, "paper", version)
+		url, sum, build, err = resolveFill(ctx, "paper", version)
 		algo = "sha256"
 	case TypeFolia:
-		url, sum, err = resolveFill(ctx, "folia", version)
+		url, sum, build, err = resolveFill(ctx, "folia", version)
 		algo = "sha256"
 	case TypeVelocity:
-		url, sum, err = resolveFill(ctx, "velocity", version)
+		url, sum, build, err = resolveFill(ctx, "velocity", version)
 		algo = "sha256"
 	case TypeWaterfall:
-		url, sum, err = resolveFill(ctx, "waterfall", version)
+		url, sum, build, err = resolveFill(ctx, "waterfall", version)
 		algo = "sha256"
 	case TypePurpur:
-		url, sum, err = resolvePurpur(ctx, version)
+		url, sum, build, err = resolvePurpur(ctx, version)
 		algo = "" // Purpur publishes md5 only; rely on TLS
 		sum = ""
 	default:
-		return fmt.Errorf("unknown server type %q", typ)
+		return "", fmt.Errorf("unknown server type %q", typ)
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
-	return downloadVerified(ctx, url, destPath, algo, sum, progress)
+	return build, downloadVerified(ctx, url, destPath, algo, sum, progress)
+}
+
+// HasBuilds reports whether typ publishes numbered builds within one
+// Minecraft version, so servers can be updated in place.
+func HasBuilds(typ string) bool {
+	switch typ {
+	case TypePaper, TypeFolia, TypeVelocity, TypeWaterfall, TypePurpur:
+		return true
+	}
+	return false
+}
+
+// LatestBuild returns the newest available build identifier for typ/version.
+func (v *Versions) LatestBuild(ctx context.Context, typ, version string) (string, error) {
+	switch typ {
+	case TypePaper:
+		_, _, b, err := resolveFill(ctx, "paper", version)
+		return b, err
+	case TypeFolia:
+		_, _, b, err := resolveFill(ctx, "folia", version)
+		return b, err
+	case TypeVelocity:
+		_, _, b, err := resolveFill(ctx, "velocity", version)
+		return b, err
+	case TypeWaterfall:
+		_, _, b, err := resolveFill(ctx, "waterfall", version)
+		return b, err
+	case TypePurpur:
+		_, _, b, err := resolvePurpur(ctx, version)
+		return b, err
+	}
+	return "", fmt.Errorf("no build channel for %q", typ)
 }
 
 type mojangManifest struct {
@@ -288,13 +322,13 @@ type paperBuild struct {
 	} `json:"downloads"`
 }
 
-func resolveFill(ctx context.Context, project, version string) (url, sha256sum string, err error) {
+func resolveFill(ctx context.Context, project, version string) (url, sha256sum, build string, err error) {
 	var builds []paperBuild
 	if err := getJSON(ctx, fmt.Sprintf("%s/%s/versions/%s/builds", fillAPIBase, project, version), &builds); err != nil {
-		return "", "", fmt.Errorf("%s builds for %s: %w", project, version, err)
+		return "", "", "", fmt.Errorf("%s builds for %s: %w", project, version, err)
 	}
 	if len(builds) == 0 {
-		return "", "", fmt.Errorf("no %s builds available for %s", project, version)
+		return "", "", "", fmt.Errorf("no %s builds available for %s", project, version)
 	}
 	// The API lists newest builds first. Prefer the newest stable build.
 	pick := builds[0]
@@ -306,9 +340,9 @@ func resolveFill(ctx context.Context, project, version string) (url, sha256sum s
 	}
 	dl, ok := pick.Downloads["server:default"]
 	if !ok || dl.URL == "" {
-		return "", "", fmt.Errorf("%s build %d for %s has no server download", project, pick.ID, version)
+		return "", "", "", fmt.Errorf("%s build %d for %s has no server download", project, pick.ID, version)
 	}
-	return dl.URL, dl.Checksums.SHA256, nil
+	return dl.URL, dl.Checksums.SHA256, strconv.Itoa(pick.ID), nil
 }
 
 /* ---------- bedrock ---------- */
@@ -573,19 +607,19 @@ func listPurpur(ctx context.Context) ([]VersionInfo, error) {
 	return out, nil
 }
 
-func resolvePurpur(ctx context.Context, version string) (url, checksum string, err error) {
+func resolvePurpur(ctx context.Context, version string) (url, checksum, build string, err error) {
 	var resp struct {
 		Builds struct {
 			Latest string `json:"latest"`
 		} `json:"builds"`
 	}
 	if err := getJSON(ctx, purpurAPIBase+"/"+version, &resp); err != nil {
-		return "", "", fmt.Errorf("purpur %s: %w", version, err)
+		return "", "", "", fmt.Errorf("purpur %s: %w", version, err)
 	}
 	if resp.Builds.Latest == "" {
-		return "", "", fmt.Errorf("no purpur builds for %s", version)
+		return "", "", "", fmt.Errorf("no purpur builds for %s", version)
 	}
 	// Direct download URL; md5 available at .../builds/{build} but unused.
 	u := fmt.Sprintf("%s/%s/%s/download", purpurAPIBase, version, resp.Builds.Latest)
-	return u, "", nil
+	return u, "", resp.Builds.Latest, nil
 }

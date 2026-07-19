@@ -130,6 +130,7 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("DELETE /api/servers/{id}/backups", h.backupDelete)
 	mux.HandleFunc("GET /api/servers/{id}/backups/download", h.backupDownload)
 	mux.HandleFunc("POST /api/servers/{id}/upgrade", h.upgrade)
+	mux.HandleFunc("GET /api/servers/{id}/build-update", h.buildUpdate)
 	mux.HandleFunc("POST /api/servers/{id}/discord/test", h.discordTest)
 	mux.HandleFunc("GET /api/servers/{id}/network", h.networkInfo)
 	mux.HandleFunc("PUT /api/servers/{id}/network", h.networkSet)

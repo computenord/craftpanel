@@ -59,6 +59,11 @@ type Instance struct {
 	// alongside Version (the Minecraft release). Empty for non-modded servers.
 	LoaderVersion string `json:"loaderVersion,omitempty"`
 
+	// Build is the upstream build identifier of the installed jar for types
+	// with a build channel (Paper family, Purpur). Empty when unknown or not
+	// applicable.
+	Build string `json:"build,omitempty"`
+
 	// Modpack is set when the server was created from a Modrinth modpack.
 	Modpack *ModpackRef `json:"modpack,omitempty"`
 
@@ -675,6 +680,42 @@ func (m *Manager) Upgrade(id, version string) error {
 	return nil
 }
 
+// BuildUpdateInfo reports the installed jar build and the newest one
+// published upstream for the server's current Minecraft version.
+type BuildUpdateInfo struct {
+	Supported       bool   `json:"supported"`
+	Build           string `json:"build,omitempty"`
+	Latest          string `json:"latest,omitempty"`
+	UpdateAvailable bool   `json:"updateAvailable"`
+}
+
+// BuildUpdate checks upstream for a newer build of the installed version.
+// Applying an update is a plain Upgrade to the same version: the installer
+// always resolves the newest build.
+func (m *Manager) BuildUpdate(ctx context.Context, id string) (BuildUpdateInfo, error) {
+	srv, err := m.get(id)
+	if err != nil {
+		return BuildUpdateInfo{}, err
+	}
+	srv.mu.Lock()
+	typ := srv.meta.Type
+	version := srv.meta.Version
+	modpack := srv.meta.Modpack != nil
+	info := BuildUpdateInfo{Build: srv.meta.Build}
+	srv.mu.Unlock()
+	if modpack || !HasBuilds(typ) {
+		return info, nil
+	}
+	info.Supported = true
+	latest, err := m.versions.LatestBuild(ctx, typ, version)
+	if err != nil {
+		return info, err
+	}
+	info.Latest = latest
+	info.UpdateAvailable = latest != "" && info.Build != "" && latest != info.Build
+	return info, nil
+}
+
 // UpgradeModpack switches a Modrinth modpack server to another pack version.
 // The world is kept; mods and pack overrides are replaced.
 func (m *Manager) UpgradeModpack(id, versionID string) error {
@@ -749,6 +790,7 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 
 	var err error
 	javaMajor := 0
+	build := ""
 	switch {
 	case typ == TypeBedrock:
 		var installed string
@@ -783,7 +825,7 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 		}
 	default:
 		dest := filepath.Join(srv.DataDir(), jarName)
-		err = m.versions.DownloadServerJar(ctx, typ, version, dest, progress)
+		build, err = m.versions.DownloadServerJar(ctx, typ, version, dest, progress)
 	}
 
 	// Record the Java requirement while we are online anyway, so a later
@@ -819,6 +861,10 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 	}
 	if srv.meta.LoaderVersion != loaderVersion {
 		srv.meta.LoaderVersion = loaderVersion
+		changed = true
+	}
+	if srv.meta.Build != build {
+		srv.meta.Build = build
 		changed = true
 	}
 	if javaMajor > 0 && srv.meta.JavaMajor != javaMajor {

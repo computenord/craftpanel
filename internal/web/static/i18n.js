@@ -584,7 +584,13 @@ const STRINGS = {
     "wiz.src.clone": "Clone",
     "wiz.src.cloneDesc": "Duplicate an existing server",
     "wiz.src.import": "Import",
-    "wiz.src.importDesc": "Existing server directory or archive as zip"
+    "wiz.src.importDesc": "Existing server directory or archive as zip",
+
+    "build.available": "Build {latest} is available — installed: build {current}",
+    "build.availableUnknown": "Newest build: {latest} — installed build unknown",
+    "build.update": "Update build",
+    "build.upToDate": "latest build",
+    "build.confirm": "Download the newest {version} build and replace the server jar? The server must be stopped for this. World and settings are kept."
   },
   de: {
     "app.tagline": "Selbst gehostetes Minecraft Management von ComputeBox",
@@ -1168,7 +1174,13 @@ const STRINGS = {
     "wiz.src.clone": "Klonen",
     "wiz.src.cloneDesc": "Bestehenden Server duplizieren",
     "wiz.src.import": "Import",
-    "wiz.src.importDesc": "Vorhandenes Server-Verzeichnis / Archiv als Zip"
+    "wiz.src.importDesc": "Vorhandenes Server-Verzeichnis / Archiv als Zip",
+
+    "build.available": "Build {latest} ist verfügbar — installiert: Build {current}",
+    "build.availableUnknown": "Neuester Build: {latest} — installierter Build unbekannt",
+    "build.update": "Build aktualisieren",
+    "build.upToDate": "neuester Build",
+    "build.confirm": "Neuesten Build für {version} herunterladen und das Server-Jar ersetzen? Der Server muss dafür gestoppt sein. Welt und Einstellungen bleiben erhalten."
   }
 };
 
