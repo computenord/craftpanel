@@ -26,7 +26,7 @@ func loadersFor(typ string) []string {
 	return []string{"paper", "spigot", "bukkit", "folia"}
 }
 
-var ErrPluginsUnsupported = errors.New("plugins are only available on paper and velocity servers")
+var ErrPluginsUnsupported = errors.New("plugins are only available on paper, purpur, folia, velocity and waterfall servers")
 
 const pluginManifestFile = "plugins.json"
 
@@ -64,7 +64,7 @@ func (m *Manager) pluginServer(id string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	if srv.meta.Type != TypePaper && srv.meta.Type != TypeVelocity {
+	if !IsPluginServer(srv.meta.Type) {
 		return nil, ErrPluginsUnsupported
 	}
 	return srv, nil
@@ -213,10 +213,16 @@ func (m *Manager) SearchPlugins(ctx context.Context, id, query, index string) ([
 }
 
 type modrinthVersion struct {
-	ID            string `json:"id"`
-	VersionNumber string `json:"version_number"`
-	DatePublished string `json:"date_published"`
-	Files         []struct {
+	ID            string   `json:"id"`
+	VersionNumber string   `json:"version_number"`
+	DatePublished string   `json:"date_published"`
+	GameVersions  []string `json:"game_versions"`
+	Loaders       []string `json:"loaders"`
+	Dependencies  []struct {
+		ProjectID      string `json:"project_id"`
+		DependencyType string `json:"dependency_type"`
+	} `json:"dependencies"`
+	Files []struct {
 		URL      string `json:"url"`
 		Filename string `json:"filename"`
 		Primary  bool   `json:"primary"`

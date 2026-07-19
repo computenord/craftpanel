@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -31,29 +33,61 @@ const (
 
 // Only real Discord webhook endpoints are accepted, the panel must not be
 // usable as a generic request proxy.
-func validDiscordWebhook(url string) bool {
-	return strings.HasPrefix(url, "https://discord.com/api/webhooks/") ||
-		strings.HasPrefix(url, "https://discordapp.com/api/webhooks/") ||
-		strings.HasPrefix(url, "https://ptb.discord.com/api/webhooks/") ||
-		strings.HasPrefix(url, "https://canary.discord.com/api/webhooks/")
+func validDiscordWebhook(u string) bool {
+	return strings.HasPrefix(u, "https://discord.com/api/webhooks/") ||
+		strings.HasPrefix(u, "https://discordapp.com/api/webhooks/") ||
+		strings.HasPrefix(u, "https://ptb.discord.com/api/webhooks/") ||
+		strings.HasPrefix(u, "https://canary.discord.com/api/webhooks/")
+}
+
+// validWebhookURL accepts Discord webhooks or other https URLs that resolve
+// to public addresses (SSRF-safe generic webhooks).
+func validWebhookURL(raw string) bool {
+	if validDiscordWebhook(raw) {
+		return true
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return false
+	}
+	host := u.Hostname()
+	if host == "localhost" || strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".internal") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return false
+		}
+	}
+	return true
 }
 
 var discordClient = &http.Client{Timeout: 10 * time.Second}
 
 // postDiscord delivers one message. Mentions are disabled so nothing coming
-// out of a game chat can ping people.
+// out of a game chat can ping people. Generic https webhooks receive JSON
+// {"text":"...","source":"craftpanel"}.
 func postDiscord(webhook, content string) error {
-	if !validDiscordWebhook(webhook) {
-		return errors.New("not a discord webhook URL")
+	if !validWebhookURL(webhook) {
+		return errors.New("invalid webhook URL")
 	}
 	if len(content) > 1900 {
 		content = content[:1900] + "…"
 	}
-	payload, err := json.Marshal(map[string]any{
-		"content":          content,
-		"username":         "ComputeBox Craftpanel",
-		"allowed_mentions": map[string]any{"parse": []string{}},
-	})
+	var payload []byte
+	var err error
+	if validDiscordWebhook(webhook) {
+		payload, err = json.Marshal(map[string]any{
+			"content":          content,
+			"username":         "ComputeBox Craftpanel",
+			"allowed_mentions": map[string]any{"parse": []string{}},
+		})
+	} else {
+		payload, err = json.Marshal(map[string]any{
+			"text":   content,
+			"source": "craftpanel",
+		})
+	}
 	if err != nil {
 		return err
 	}
@@ -63,7 +97,7 @@ func postDiscord(webhook, content string) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("discord answered %s", resp.Status)
+		return fmt.Errorf("webhook answered %s", resp.Status)
 	}
 	return nil
 }

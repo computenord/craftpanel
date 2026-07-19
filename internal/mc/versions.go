@@ -123,8 +123,14 @@ func (v *Versions) List(ctx context.Context, typ string) ([]VersionInfo, error) 
 		list, err = listVanilla(ctx)
 	case TypePaper:
 		list, err = listFill(ctx, "paper")
+	case TypeFolia:
+		list, err = listFill(ctx, "folia")
 	case TypeVelocity:
 		list, err = listFill(ctx, "velocity")
+	case TypeWaterfall:
+		list, err = listFill(ctx, "waterfall")
+	case TypePurpur:
+		list, err = listPurpur(ctx)
 	case TypeBedrock:
 		list, err = listBedrock(ctx)
 	case TypeFabric:
@@ -159,9 +165,19 @@ func (v *Versions) DownloadServerJar(ctx context.Context, typ, version, destPath
 	case TypePaper:
 		url, sum, err = resolveFill(ctx, "paper", version)
 		algo = "sha256"
+	case TypeFolia:
+		url, sum, err = resolveFill(ctx, "folia", version)
+		algo = "sha256"
 	case TypeVelocity:
 		url, sum, err = resolveFill(ctx, "velocity", version)
 		algo = "sha256"
+	case TypeWaterfall:
+		url, sum, err = resolveFill(ctx, "waterfall", version)
+		algo = "sha256"
+	case TypePurpur:
+		url, sum, err = resolvePurpur(ctx, version)
+		algo = "" // Purpur publishes md5 only; rely on TLS
+		sum = ""
 	default:
 		return fmt.Errorf("unknown server type %q", typ)
 	}
@@ -532,4 +548,44 @@ func downloadVerified(ctx context.Context, url, destPath, algo, wantSum string, 
 		return fmt.Errorf("checksum mismatch for %s", url)
 	}
 	return os.Rename(tmpPath, destPath)
+}
+
+const purpurAPIBase = "https://api.purpurmc.org/v2/purpur"
+
+func listPurpur(ctx context.Context) ([]VersionInfo, error) {
+	var resp struct {
+		Versions []string `json:"versions"`
+	}
+	if err := getJSON(ctx, purpurAPIBase, &resp); err != nil {
+		return nil, fmt.Errorf("purpur versions: %w", err)
+	}
+	out := make([]VersionInfo, 0, len(resp.Versions))
+	for i := len(resp.Versions) - 1; i >= 0; i-- {
+		v := resp.Versions[i]
+		if strings.Contains(v, "-") {
+			continue
+		}
+		out = append(out, VersionInfo{ID: v})
+	}
+	if len(out) > 0 {
+		out[0].Latest = true
+	}
+	return out, nil
+}
+
+func resolvePurpur(ctx context.Context, version string) (url, checksum string, err error) {
+	var resp struct {
+		Builds struct {
+			Latest string `json:"latest"`
+		} `json:"builds"`
+	}
+	if err := getJSON(ctx, purpurAPIBase+"/"+version, &resp); err != nil {
+		return "", "", fmt.Errorf("purpur %s: %w", version, err)
+	}
+	if resp.Builds.Latest == "" {
+		return "", "", fmt.Errorf("no purpur builds for %s", version)
+	}
+	// Direct download URL; md5 available at .../builds/{build} but unused.
+	u := fmt.Sprintf("%s/%s/%s/download", purpurAPIBase, version, resp.Builds.Latest)
+	return u, "", nil
 }

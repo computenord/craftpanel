@@ -18,8 +18,11 @@ import (
 )
 
 // username resolves the signed-in user. Handlers behind authGate can rely on
-// a valid session cookie being present.
+// a valid session cookie or API token being present.
 func (h *Handler) username(r *http.Request) string {
+	if u, ok := auth.UserFromRequest(r); ok {
+		return u.Username
+	}
 	cookie, err := r.Cookie(auth.SessionCookie)
 	if err != nil {
 		return ""
@@ -33,38 +36,53 @@ func (h *Handler) username(r *http.Request) string {
 // settingsDTO is the settings representation the UI works with. The DNS
 // token itself never leaves the host, only whether one is stored.
 type settingsDTO struct {
-	BackupDir   string       `json:"backupDir"`
-	Domain      string       `json:"domain"`
-	DNSProvider string       `json:"dnsProvider"`
-	DNSTarget   string       `json:"dnsTarget"`
-	DNSTokenSet bool         `json:"dnsTokenSet"`
-	DNS         mc.DNSStatus `json:"dns"`
-	Warnings    []string     `json:"warnings,omitempty"`
+	BackupDir        string       `json:"backupDir"`
+	Domain           string       `json:"domain"`
+	DNSProvider      string       `json:"dnsProvider"`
+	DNSTarget        string       `json:"dnsTarget"`
+	DNSTokenSet      bool         `json:"dnsTokenSet"`
+	CurseForgeKeySet bool         `json:"curseForgeKeySet"`
+	SFTPAddr         string       `json:"sftpAddr"`
+	DNS              mc.DNSStatus `json:"dns"`
+	Warnings         []string     `json:"warnings,omitempty"`
 }
 
 func (h *Handler) settingsDTO() settingsDTO {
 	st := h.Manager.Settings()
 	return settingsDTO{
-		BackupDir:   st.BackupDir,
-		Domain:      st.Domain,
-		DNSProvider: st.DNSProvider,
-		DNSTarget:   st.DNSTarget,
-		DNSTokenSet: st.DNSToken != "",
-		DNS:         h.Manager.DNSStatus(),
+		BackupDir:        st.BackupDir,
+		Domain:           st.Domain,
+		DNSProvider:      st.DNSProvider,
+		DNSTarget:        st.DNSTarget,
+		DNSTokenSet:      st.DNSToken != "",
+		CurseForgeKeySet: st.CurseForgeKey != "",
+		SFTPAddr:         st.SFTPAddr,
+		DNS:              h.Manager.DNSStatus(),
 	}
 }
 
 func (h *Handler) getSettings(w http.ResponseWriter, r *http.Request) {
+	// All signed-in users may read settings (DNS/domain shown in UI);
+	// mutations stay admin-only via putSettings.
+	if _, ok := h.currentUser(r); !ok {
+		apiError(w, http.StatusUnauthorized, "unauthorized", "not signed in")
+		return
+	}
 	writeJSON(w, http.StatusOK, h.settingsDTO())
 }
 
 func (h *Handler) putSettings(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
 	var req struct {
-		BackupDir   *string `json:"backupDir"`
-		Domain      *string `json:"domain"`
-		DNSProvider *string `json:"dnsProvider"`
-		DNSTarget   *string `json:"dnsTarget"`
-		DNSToken    *string `json:"dnsToken"`
+		BackupDir     *string `json:"backupDir"`
+		Domain        *string `json:"domain"`
+		DNSProvider   *string `json:"dnsProvider"`
+		DNSTarget     *string `json:"dnsTarget"`
+		DNSToken      *string `json:"dnsToken"`
+		CurseForgeKey *string `json:"curseForgeKey"`
+		SFTPAddr      *string `json:"sftpAddr"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
@@ -75,6 +93,27 @@ func (h *Handler) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		log.Printf("settings: backup dir set to %q", *req.BackupDir)
+	}
+	if req.CurseForgeKey != nil {
+		if err := h.Manager.SetCurseForgeKey(req.CurseForgeKey); err != nil {
+			apiError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		log.Printf("settings: curseforge API key updated")
+	}
+	if req.SFTPAddr != nil {
+		if err := h.Manager.SetSFTPAddr(*req.SFTPAddr); err != nil {
+			apiError(w, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if h.SFTP != nil {
+			h.SFTP.Stop()
+			if err := h.SFTP.Start(strings.TrimSpace(*req.SFTPAddr)); err != nil {
+				apiError(w, http.StatusBadRequest, "bad_request", "sftp listen: "+err.Error())
+				return
+			}
+		}
+		log.Printf("settings: sftp addr set to %q", *req.SFTPAddr)
 	}
 	warnings := []string{}
 	if req.Domain != nil || req.DNSProvider != nil || req.DNSTarget != nil || req.DNSToken != nil {
@@ -260,13 +299,14 @@ func (h *Handler) networkInfo(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) networkSet(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Servers []string `json:"servers"`
+		Servers       []string `json:"servers"`
+		ProxyProtocol *bool    `json:"proxyProtocol"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return
 	}
 	id := r.PathValue("id")
-	warnings, err := h.Manager.SetNetwork(id, req.Servers)
+	warnings, err := h.Manager.SetNetwork(id, req.Servers, req.ProxyProtocol)
 	if err != nil {
 		if errors.Is(err, mc.ErrNotVelocity) {
 			apiError(w, http.StatusBadRequest, "not_velocity", "this server is not a velocity proxy")

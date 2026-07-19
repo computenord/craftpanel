@@ -18,13 +18,14 @@ import (
 	"github.com/computenord/craftpanel/internal/fsutil"
 )
 
-// ModpackRef is persisted on an Instance created from a Modrinth modpack.
+// ModpackRef is persisted on an Instance created from a modpack.
 type ModpackRef struct {
 	ProjectID string `json:"projectId"`
 	VersionID string `json:"versionId"`
 	Slug      string `json:"slug,omitempty"`
 	Title     string `json:"title,omitempty"`
 	Version   string `json:"version,omitempty"`
+	Source    string `json:"source,omitempty"` // modrinth | curseforge
 }
 
 type ModpackSearchHit struct {
@@ -35,6 +36,7 @@ type ModpackSearchHit struct {
 	Downloads   int      `json:"downloads"`
 	Loaders     []string `json:"loaders"`
 	Versions    []string `json:"gameVersions"`
+	Source      string   `json:"source"`
 }
 
 type ModpackVersionInfo struct {
@@ -44,15 +46,33 @@ type ModpackVersionInfo struct {
 	GameVersions  []string `json:"gameVersions"`
 	Loaders       []string `json:"loaders"`
 	DatePublished string   `json:"datePublished"`
+	Source        string   `json:"source,omitempty"`
+}
+
+// ModpackAnalysis summarizes whether a pack is useful on a dedicated server.
+type ModpackAnalysis struct {
+	Source           string `json:"source"`
+	ServerFiles      int    `json:"serverFiles"`
+	ClientOnlyFiles  int    `json:"clientOnlyFiles"`
+	HasOverrides     bool   `json:"hasOverrides"`
+	Suitability      string `json:"suitability"` // good | mixed | client
+	SuggestedMemoryMB int   `json:"suggestedMemoryMB"`
+	SuggestedJavaMajor int  `json:"suggestedJavaMajor,omitempty"`
+	Minecraft        string `json:"minecraft,omitempty"`
+	LoaderType       string `json:"loaderType,omitempty"`
+	LoaderVersion    string `json:"loaderVersion,omitempty"`
+	Message          string `json:"message"`
 }
 
 type resolvedModpack struct {
-	Ref           ModpackRef
-	LoaderType    string // fabric | forge | neoforge | quilt
-	Minecraft     string
-	MrpackURL     string
-	MrpackSHA512  string
-	MrpackName    string
+	Ref          ModpackRef
+	LoaderType   string // fabric | forge | neoforge | quilt
+	Minecraft    string
+	MrpackURL    string
+	MrpackSHA512 string
+	MrpackName   string
+	Source       string
+	CurseForge   bool
 }
 
 type mrpackIndex struct {
@@ -72,9 +92,39 @@ type mrpackIndex struct {
 	Dependencies map[string]string `json:"dependencies"`
 }
 
-// SearchModpacks queries Modrinth for server-friendly modpacks.
-func SearchModpacks(ctx context.Context, query, index string) ([]ModpackSearchHit, error) {
+// SearchModpacks queries Modrinth and/or CurseForge for modpacks.
+// source: ""|"all"|"modrinth"|"curseforge"
+func (m *Manager) SearchModpacks(ctx context.Context, query, index, source string) ([]ModpackSearchHit, error) {
 	query = strings.TrimSpace(query)
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == "" {
+		source = "all"
+	}
+	var out []ModpackSearchHit
+	if source == "all" || source == SourceModrinth {
+		hits, err := searchModrinthModpacks(ctx, query, index)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, hits...)
+	}
+	if source == "all" || source == SourceCurseForge {
+		if key := m.curseForgeKey(); key != "" {
+			hits, err := searchCurseForgeModpacks(ctx, key, query)
+			if err != nil && source == SourceCurseForge {
+				return nil, err
+			}
+			if err == nil {
+				out = append(out, hits...)
+			}
+		} else if source == SourceCurseForge {
+			return nil, errors.New("curseforge API key is not configured in panel settings")
+		}
+	}
+	return out, nil
+}
+
+func searchModrinthModpacks(ctx context.Context, query, index string) ([]ModpackSearchHit, error) {
 	if !searchIndexes[index] {
 		index = "relevance"
 	}
@@ -92,14 +142,14 @@ func SearchModpacks(ctx context.Context, query, index string) ([]ModpackSearchHi
 
 	var resp struct {
 		Hits []struct {
-			ProjectID     string   `json:"project_id"`
-			Slug          string   `json:"slug"`
-			Title         string   `json:"title"`
-			Description   string   `json:"description"`
-			Downloads     int      `json:"downloads"`
-			Categories    []string `json:"categories"`
-			Versions      []string `json:"versions"`
-			DisplayCats   []string `json:"display_categories"`
+			ProjectID   string   `json:"project_id"`
+			Slug        string   `json:"slug"`
+			Title       string   `json:"title"`
+			Description string   `json:"description"`
+			Downloads   int      `json:"downloads"`
+			Categories  []string `json:"categories"`
+			Versions    []string `json:"versions"`
+			DisplayCats []string `json:"display_categories"`
 		} `json:"hits"`
 	}
 	if err := getJSON(ctx, searchURL, &resp); err != nil {
@@ -123,6 +173,7 @@ func SearchModpacks(ctx context.Context, query, index string) ([]ModpackSearchHi
 			Downloads:   h.Downloads,
 			Loaders:     loaders,
 			Versions:    h.Versions,
+			Source:      SourceModrinth,
 		})
 	}
 	return out, nil
@@ -142,8 +193,16 @@ func filterLoaderTags(cats []string) []string {
 	return out
 }
 
-// ListModpackVersions lists published versions of a Modrinth modpack project.
-func ListModpackVersions(ctx context.Context, project string) ([]ModpackVersionInfo, error) {
+// ListModpackVersions lists published versions of a modpack project.
+func (m *Manager) ListModpackVersions(ctx context.Context, project, source string) ([]ModpackVersionInfo, error) {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == SourceCurseForge {
+		return listCurseForgeModpackVersions(ctx, m.curseForgeKey(), project)
+	}
+	return listModrinthModpackVersions(ctx, project)
+}
+
+func listModrinthModpackVersions(ctx context.Context, project string) ([]ModpackVersionInfo, error) {
 	project = strings.TrimSpace(project)
 	if project == "" || strings.ContainsAny(project, "/\\ ") {
 		return nil, errors.New("invalid project id")
@@ -173,13 +232,99 @@ func ListModpackVersions(ctx context.Context, project string) ([]ModpackVersionI
 			GameVersions:  v.GameVersions,
 			Loaders:       v.Loaders,
 			DatePublished: v.DatePublished,
+			Source:        SourceModrinth,
 		})
 	}
 	return out, nil
 }
 
-// resolveModpack picks a Modrinth modpack version and the .mrpack download.
-func resolveModpack(ctx context.Context, project, versionID string) (resolvedModpack, error) {
+// AnalyzeModpack downloads pack metadata and reports server suitability + resource hints.
+func (m *Manager) AnalyzeModpack(ctx context.Context, source, project, versionID string) (ModpackAnalysis, error) {
+	pack, err := m.resolveModpack(ctx, source, project, versionID)
+	if err != nil {
+		return ModpackAnalysis{}, err
+	}
+	a := ModpackAnalysis{
+		Source:            pack.Source,
+		Minecraft:         pack.Minecraft,
+		LoaderType:        pack.LoaderType,
+		SuggestedMemoryMB: 6144,
+	}
+	if major, err := m.versions.JavaMajor(ctx, pack.Minecraft); err == nil && major > 0 {
+		a.SuggestedJavaMajor = major
+	}
+	if pack.CurseForge {
+		// Lightweight: CF packs that resolve are usually server-installable once
+		// the manifest has mods; full zip analysis happens at install time.
+		a.Suitability = "good"
+		a.Message = "CurseForge pack looks installable. Large packs need more RAM."
+		if a.SuggestedJavaMajor == 0 {
+			a.SuggestedJavaMajor = 21
+		}
+		return a, nil
+	}
+
+	tmp, err := os.CreateTemp("", "craftpanel-mrpack-*")
+	if err != nil {
+		return ModpackAnalysis{}, err
+	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
+	if err := downloadVerified(ctx, pack.MrpackURL, tmpPath, "sha512", pack.MrpackSHA512, nil); err != nil {
+		return ModpackAnalysis{}, err
+	}
+	index, err := readMrpackIndex(tmpPath)
+	if err != nil {
+		return ModpackAnalysis{}, err
+	}
+	serverFiles := filterServerMrpackFiles(index)
+	clientOnly := 0
+	for _, f := range index.Files {
+		if f.Env != nil && strings.EqualFold(f.Env.Server, "unsupported") {
+			clientOnly++
+		}
+	}
+	a.ServerFiles = len(serverFiles)
+	a.ClientOnlyFiles = clientOnly
+	a.HasOverrides = mrpackHasOverrides(tmpPath)
+	a.LoaderVersion = loaderDepVersion(index.Dependencies, pack.LoaderType)
+	if mc := index.Dependencies["minecraft"]; mc != "" {
+		a.Minecraft = mc
+	}
+	switch {
+	case a.ServerFiles == 0 && !a.HasOverrides:
+		a.Suitability = "client"
+		a.Message = "This pack has no server-side mods or overrides (client-only)."
+		a.SuggestedMemoryMB = 2048
+	case a.ClientOnlyFiles > a.ServerFiles*2 && a.ServerFiles < 5:
+		a.Suitability = "mixed"
+		a.Message = "Most files are client-only; only a small server footprint will be installed."
+		a.SuggestedMemoryMB = 4096
+	default:
+		a.Suitability = "good"
+		a.Message = "Pack looks suitable for a dedicated server."
+		if a.ServerFiles > 80 {
+			a.SuggestedMemoryMB = 8192
+		} else if a.ServerFiles > 40 {
+			a.SuggestedMemoryMB = 6144
+		} else {
+			a.SuggestedMemoryMB = 4096
+		}
+	}
+	return a, nil
+}
+
+// resolveModpack picks a modpack version and its download.
+func (m *Manager) resolveModpack(ctx context.Context, source, project, versionID string) (resolvedModpack, error) {
+	source = strings.ToLower(strings.TrimSpace(source))
+	if source == SourceCurseForge {
+		return resolveCurseForgeModpack(ctx, m.curseForgeKey(), project, versionID)
+	}
+	return resolveModrinthModpack(ctx, project, versionID)
+}
+
+func resolveModrinthModpack(ctx context.Context, project, versionID string) (resolvedModpack, error) {
 	project = strings.TrimSpace(project)
 	versionID = strings.TrimSpace(versionID)
 	if project == "" || strings.ContainsAny(project, "/\\ ") {
@@ -210,7 +355,7 @@ func resolveModpack(ctx context.Context, project, versionID string) (resolvedMod
 		} `json:"files"`
 	}
 	if versionID == "" {
-		versions, err := ListModpackVersions(ctx, proj.ID)
+		versions, err := listModrinthModpackVersions(ctx, proj.ID)
 		if err != nil {
 			return resolvedModpack{}, err
 		}
@@ -264,72 +409,77 @@ func resolveModpack(ctx context.Context, project, versionID string) (resolvedMod
 			Slug:      proj.Slug,
 			Title:     proj.Title,
 			Version:   ver.VersionNumber,
+			Source:    SourceModrinth,
 		},
 		LoaderType:   loaderType,
 		Minecraft:    ver.GameVersions[0],
 		MrpackURL:    fileURL,
 		MrpackSHA512: sha512,
 		MrpackName:   fileName,
+		Source:       SourceModrinth,
 	}, nil
 }
 
-// installModpack downloads a Modrinth .mrpack, installs the declared loader,
-// downloads pack files, and applies overrides into the server data directory.
+// installModpack installs a Modrinth .mrpack or CurseForge zip pack.
 // World data is kept; mods/ and the panel mod manifest are replaced.
-func (m *Manager) installModpack(ctx context.Context, srv *Server, pack resolvedModpack, javaPath string, progress func(done, total int64)) (mcVersion, loaderVersion string, err error) {
+func (m *Manager) installModpack(ctx context.Context, srv *Server, pack resolvedModpack, javaPath string, progress func(done, total int64)) (mcVersion, loaderType, loaderVersion string, err error) {
+	if pack.CurseForge || pack.Source == SourceCurseForge {
+		return m.installCurseForgeModpack(ctx, srv, pack, m.curseForgeKey(), javaPath, progress)
+	}
+	loaderType = pack.LoaderType
 	dataDir := srv.DataDir()
 	mrpackPath := filepath.Join(dataDir, ".modpack.mrpack")
 	defer os.Remove(mrpackPath)
 
 	stage := stagedProgress{report: progress}
 	if err := downloadVerified(ctx, pack.MrpackURL, mrpackPath, "sha512", pack.MrpackSHA512, stage.span(0, 0.15)); err != nil {
-		return "", "", fmt.Errorf("download modpack: %w", err)
+		return "", "", "", fmt.Errorf("download modpack: %w", err)
 	}
 
 	index, err := readMrpackIndex(mrpackPath)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	mcVersion = index.Dependencies["minecraft"]
 	if mcVersion == "" {
 		mcVersion = pack.Minecraft
 	}
-	loaderVersion = loaderDepVersion(index.Dependencies, pack.LoaderType)
+	loaderVersion = loaderDepVersion(index.Dependencies, loaderType)
 	if mcVersion == "" {
-		return "", "", errors.New("modpack index is missing a minecraft dependency")
+		return "", "", "", errors.New("modpack index is missing a minecraft dependency")
 	}
 
 	files := filterServerMrpackFiles(index)
 	hasOverrides := mrpackHasOverrides(mrpackPath)
 	if len(files) == 0 && !hasOverrides {
 		if len(index.Files) > 0 {
-			return "", "", errors.New("this modpack has no server-side content (client-only pack)")
+			return "", "", "", errors.New("this modpack has no server-side content (client-only pack)")
 		}
-		return "", "", errors.New("modpack contains no installable files")
+		return "", "", "", errors.New("modpack contains no installable files")
 	}
 
 	// Drop previous pack mods so upgrades do not leave stale jars behind.
 	if err := resetModpackMods(srv); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
-	res, err := m.versions.InstallLoader(ctx, pack.LoaderType, mcVersion, loaderVersion, javaPath, dataDir, stage.span(0.15, 0.35))
+	res, err := m.versions.InstallLoader(ctx, loaderType, mcVersion, loaderVersion, javaPath, dataDir, stage.span(0.15, 0.35))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if res.LoaderVersion != "" {
 		loaderVersion = res.LoaderVersion
 	}
 
 	if err := downloadMrpackFiles(ctx, dataDir, files, stage.span(0.35, 0.92)); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	if err := extractMrpackOverrides(mrpackPath, dataDir); err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	stage.set(1)
-	return mcVersion, loaderVersion, nil
+	return mcVersion, loaderType, loaderVersion, nil
 }
 
 // stagedProgress maps sub-step progress onto a single 0..1 overall bar.

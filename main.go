@@ -24,7 +24,9 @@ import (
 	"github.com/computenord/craftpanel/internal/agent"
 	"github.com/computenord/craftpanel/internal/auth"
 	"github.com/computenord/craftpanel/internal/mc"
+	"github.com/computenord/craftpanel/internal/node"
 	"github.com/computenord/craftpanel/internal/selfupdate"
+	"github.com/computenord/craftpanel/internal/sftpd"
 	"github.com/computenord/craftpanel/internal/web"
 )
 
@@ -36,12 +38,18 @@ func main() {
 	addr := flag.String("addr", ":8420", "HTTP listen address")
 	trustProxy := flag.Bool("behind-proxy", false, "trust X-Forwarded-For from a reverse proxy for login rate limiting")
 	managed := flag.Bool("managed", false, "managed hosting mode: enroll with the control plane and report telemetry")
+	panelURL := flag.String("panel", "", "panel base URL when running as a remote node agent")
+	nodeToken := flag.String("node-token", "", "node enroll token when running as a remote node agent")
 	flag.Usage = usage
 	flag.Parse()
 
 	switch flag.Arg(0) {
 	case "", "serve":
 		if err := runServe(*dataDir, *addr, *trustProxy, *managed); err != nil {
+			log.Fatal(err)
+		}
+	case "node":
+		if err := runNodeAgent(*dataDir, *panelURL, *nodeToken); err != nil {
 			log.Fatal(err)
 		}
 	case "reset-password":
@@ -65,6 +73,7 @@ Usage:
 
 Commands:
   serve                       run the panel (default)
+  node                        run as a remote node agent (-panel, -node-token)
   reset-password <username>   set a new password, read from stdin
   version                     print the version
 
@@ -149,9 +158,20 @@ func runServe(dataDir, addr string, trustProxy, managed bool) error {
 		}
 	}
 
+	nodes, err := node.NewRegistry(dataDir)
+	if err != nil {
+		return fmt.Errorf("nodes: %w", err)
+	}
+	sftpSrv := &sftpd.Server{Auth: authStore, Manager: manager, DataDir: dataDir}
+	if addr := manager.Settings().SFTPAddr; addr != "" {
+		if err := sftpSrv.Start(addr); err != nil {
+			log.Printf("sftp: %v", err)
+		}
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           web.New(authStore, manager, versions, version, trustProxy, requestRestart, lockState, ssoKey),
+		Handler:           web.New(authStore, manager, versions, version, trustProxy, requestRestart, lockState, ssoKey, nodes, sftpSrv),
 		BaseContext:       func(net.Listener) context.Context { return baseCtx },
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
@@ -178,6 +198,7 @@ func runServe(dataDir, addr string, trustProxy, managed bool) error {
 
 	log.Printf("shutting down")
 	cancelBase()
+	sftpSrv.Stop()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
@@ -196,6 +217,44 @@ func runServe(dataDir, addr string, trustProxy, managed bool) error {
 	defer cancelStop()
 	manager.StopAll(stopCtx)
 	log.Printf("bye")
+	return nil
+}
+
+func runNodeAgent(dataDir, panelURL, token string) error {
+	panelURL = strings.TrimSpace(panelURL)
+	token = strings.TrimSpace(token)
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return err
+	}
+	// Prefer flags; otherwise load node-agent.json written by the bootstrap script.
+	if panelURL == "" || token == "" {
+		cfg, err := node.LoadAgentConfig(dataDir)
+		if err != nil {
+			return errors.New("usage: craftpanel node -panel https://panel.example.com -node-token node_… -data /path\n(or place node-agent.json in the data directory via the panel bootstrap command)")
+		}
+		if panelURL == "" {
+			panelURL = cfg.PanelURL
+		}
+		if token == "" {
+			token = cfg.Token
+		}
+	} else {
+		_ = node.WriteAgentConfig(dataDir, node.AgentConfig{PanelURL: panelURL, Token: token})
+	}
+	versions := mc.NewVersions()
+	manager, err := mc.NewManager(dataDir, versions)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go manager.StartAutostarts()
+	ag := &node.Agent{PanelURL: panelURL, Token: token, Version: version, Manager: manager}
+	log.Printf("node agent: reporting to %s (data: %s)", panelURL, dataDir)
+	ag.Run(ctx)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
+	defer cancel()
+	manager.StopAll(stopCtx)
 	return nil
 }
 

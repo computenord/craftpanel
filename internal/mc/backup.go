@@ -18,6 +18,54 @@ import (
 	"github.com/computenord/craftpanel/internal/fsutil"
 )
 
+// backupPackManifest is written into data/ before zipping so a backup carries
+// modpack + managed-mod context outside of world files alone.
+type backupPackManifest struct {
+	GeneratedAt   string         `json:"generatedAt"`
+	ServerID      string         `json:"serverId"`
+	Name          string         `json:"name"`
+	Type          string         `json:"type"`
+	Version       string         `json:"version"`
+	LoaderVersion string         `json:"loaderVersion,omitempty"`
+	MemoryMB      int            `json:"memoryMB"`
+	Modpack       *ModpackRef    `json:"modpack,omitempty"`
+	ManagedMods   []backupModRef `json:"managedMods,omitempty"`
+}
+
+type backupModRef struct {
+	File      string `json:"file"`
+	ProjectID string `json:"projectId,omitempty"`
+	Title     string `json:"title,omitempty"`
+	Version   string `json:"version,omitempty"`
+}
+
+func writeBackupManifest(srv *Server) error {
+	srv.mu.Lock()
+	meta := srv.meta
+	srv.mu.Unlock()
+	man := backupPackManifest{
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+		ServerID:      meta.ID,
+		Name:          meta.Name,
+		Type:          meta.Type,
+		Version:       meta.Version,
+		LoaderVersion: meta.LoaderVersion,
+		MemoryMB:      meta.MemoryMB,
+		Modpack:       meta.Modpack,
+	}
+	if IsModded(meta.Type) {
+		for file, m := range srv.readModManifest() {
+			man.ManagedMods = append(man.ManagedMods, backupModRef{
+				File: file, ProjectID: m.ProjectID, Title: m.Title, Version: m.Version,
+			})
+		}
+		sort.Slice(man.ManagedMods, func(i, j int) bool {
+			return man.ManagedMods[i].File < man.ManagedMods[j].File
+		})
+	}
+	return fsutil.WriteJSONAtomic(filepath.Join(srv.DataDir(), "craftpanel-pack.json"), man)
+}
+
 var backupNameRe = regexp.MustCompile(`^[a-z]+-[0-9]{8}-[0-9]{6}\.zip$`)
 
 // PanelSettings is panel-wide configuration, persisted as config.json in the
@@ -36,6 +84,13 @@ type PanelSettings struct {
 	// DNSTarget pins the wildcard record target; empty auto-detects the
 	// host's public IP and follows it like a DynDNS client.
 	DNSTarget string `json:"dnsTarget,omitempty"`
+
+	// CurseForgeKey is the CurseForge Core API key for modpack search/install.
+	// It never leaves this host.
+	CurseForgeKey string `json:"curseForgeKey,omitempty"`
+
+	// SFTPAddr enables the embedded SFTP listener when non-empty (e.g. ":2222").
+	SFTPAddr string `json:"sftpAddr,omitempty"`
 }
 
 type BackupInfo struct {
@@ -52,6 +107,16 @@ func (m *Manager) Settings() PanelSettings {
 
 // SetBackupDir points backups at a new directory. Empty resets to the default
 // below the data directory. The path must be absolute and writable.
+// SetSFTPAddr sets the embedded SFTP listen address. Empty disables it.
+// The caller is responsible for (re)starting the listener.
+func (m *Manager) SetSFTPAddr(addr string) error {
+	addr = strings.TrimSpace(addr)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.settings.SFTPAddr = addr
+	return fsutil.WriteJSONAtomic(m.settingsPath, m.settings)
+}
+
 func (m *Manager) SetBackupDir(dir string) error {
 	dir = strings.TrimSpace(dir)
 	if dir != "" {
@@ -183,6 +248,10 @@ func (m *Manager) doBackup(srv *Server, kind string) (string, int64, error) {
 			defer srv.proc.SendCommand("save-on")
 		}
 	}
+
+	// Snapshot pack/mod metadata into the data dir so restores and zip
+	// downloads carry enough context to recreate the server later.
+	_ = writeBackupManifest(srv)
 
 	if err := zipDir(srv.DataDir(), dest); err != nil {
 		return "", 0, err

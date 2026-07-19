@@ -51,6 +51,7 @@ type ModEntry struct {
 	ProjectID       string `json:"projectId,omitempty"`
 	UpdateAvailable bool   `json:"updateAvailable,omitempty"`
 	NewVersion      string `json:"newVersion,omitempty"`
+	Disabled        bool   `json:"disabled,omitempty"`
 }
 
 type ModSearchHit struct {
@@ -60,6 +61,28 @@ type ModSearchHit struct {
 	Description string `json:"description"`
 	Downloads   int    `json:"downloads"`
 	Installed   bool   `json:"installed"`
+}
+
+type ModDependency struct {
+	ProjectID string `json:"projectId"`
+	Title     string `json:"title,omitempty"`
+	Type      string `json:"type"` // required | optional | incompatible | embedded
+	Installed bool   `json:"installed"`
+	Missing   bool   `json:"missing"`
+}
+
+type ModInstallPreview struct {
+	Title        string          `json:"title"`
+	Version      string          `json:"version"`
+	ProjectID    string          `json:"projectId"`
+	Dependencies []ModDependency `json:"dependencies"`
+	Compatible   bool            `json:"compatible"`
+	Message      string          `json:"message,omitempty"`
+}
+
+type ModUpdatePreview struct {
+	Updates []ModEntry `json:"updates"`
+	Count   int        `json:"count"`
 }
 
 func (m *Manager) modServer(id string) (*Server, error) {
@@ -97,15 +120,28 @@ func (m *Manager) ListMods(ctx context.Context, id string, checkUpdates bool) ([
 	changed := false
 	seen := map[string]bool{}
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(strings.ToLower(e.Name()), ".jar") {
+		if e.IsDir() {
 			continue
 		}
-		seen[e.Name()] = true
-		me := ModEntry{File: e.Name()}
+		name := e.Name()
+		low := strings.ToLower(name)
+		disabled := strings.HasSuffix(low, ".jar.disabled")
+		if !strings.HasSuffix(low, ".jar") && !disabled {
+			continue
+		}
+		display := name
+		if disabled {
+			display = strings.TrimSuffix(name, ".disabled")
+			if !strings.HasSuffix(strings.ToLower(display), ".jar") {
+				continue
+			}
+		}
+		seen[display] = true
+		me := ModEntry{File: display, Disabled: disabled}
 		if info, err := e.Info(); err == nil {
 			me.Size = info.Size()
 		}
-		if meta, ok := manifest[e.Name()]; ok {
+		if meta, ok := manifest[display]; ok {
 			me.Managed = true
 			me.Title = meta.Title
 			me.Version = meta.Version
@@ -273,15 +309,141 @@ func (m *Manager) DeleteMod(id, file string) error {
 	if name == "" || name == "." || !strings.HasSuffix(strings.ToLower(name), ".jar") {
 		return errors.New("invalid mod file name")
 	}
-	if err := os.Remove(filepath.Join(srv.modsDir(), name)); err != nil {
-		return err
-	}
+	dir := srv.modsDir()
+	_ = os.Remove(filepath.Join(dir, name))
+	_ = os.Remove(filepath.Join(dir, name+".disabled"))
 	manifest := srv.readModManifest()
 	if _, ok := manifest[name]; ok {
 		delete(manifest, name)
 		fsutil.WriteJSONAtomic(srv.modManifestPath(), manifest)
 	}
 	return nil
+}
+
+// SetModEnabled renames a mod jar to/from .jar.disabled.
+func (m *Manager) SetModEnabled(id, file string, enabled bool) error {
+	srv, err := m.modServer(id)
+	if err != nil {
+		return err
+	}
+	name := path.Base(strings.ReplaceAll(file, "\\", "/"))
+	if !strings.HasSuffix(strings.ToLower(name), ".jar") {
+		return errors.New("invalid mod file name")
+	}
+	dir := srv.modsDir()
+	active := filepath.Join(dir, name)
+	disabled := active + ".disabled"
+	if enabled {
+		if _, err := os.Stat(active); err == nil {
+			return nil
+		}
+		return os.Rename(disabled, active)
+	}
+	if _, err := os.Stat(disabled); err == nil {
+		return nil
+	}
+	return os.Rename(active, disabled)
+}
+
+// PreviewModInstall reports dependencies and compatibility for a Modrinth mod.
+func (m *Manager) PreviewModInstall(ctx context.Context, id, projectID string) (ModInstallPreview, error) {
+	srv, err := m.modServer(id)
+	if err != nil {
+		return ModInstallPreview{}, err
+	}
+	projectID = strings.TrimSpace(projectID)
+	srv.mu.Lock()
+	mcVersion := srv.meta.Version
+	loaders := modLoadersFor(srv.meta.Type)
+	srv.mu.Unlock()
+	var project struct {
+		Title string `json:"title"`
+	}
+	if err := getJSON(ctx, modrinthBase+"/project/"+url.PathEscape(projectID), &project); err != nil {
+		return ModInstallPreview{}, err
+	}
+	ver, _, err := resolveModrinthVersion(ctx, projectID, mcVersion, loaders)
+	if err != nil {
+		return ModInstallPreview{
+			Title: project.Title, ProjectID: projectID, Compatible: false,
+			Message: err.Error(),
+		}, nil
+	}
+	installed := map[string]bool{}
+	for _, meta := range srv.readModManifest() {
+		installed[meta.ProjectID] = true
+	}
+	// Also treat jars present without manifest as unknown — only managed IDs.
+	deps := []ModDependency{}
+	compatible := true
+	for _, d := range ver.Dependencies {
+		if d.ProjectID == "" {
+			continue
+		}
+		dt := strings.ToLower(d.DependencyType)
+		title := d.ProjectID
+		var depProj struct {
+			Title string `json:"title"`
+		}
+		if err := getJSON(ctx, modrinthBase+"/project/"+url.PathEscape(d.ProjectID), &depProj); err == nil && depProj.Title != "" {
+			title = depProj.Title
+		}
+		isInstalled := installed[d.ProjectID]
+		missing := dt == "required" && !isInstalled
+		if dt == "incompatible" && isInstalled {
+			compatible = false
+		}
+		if missing {
+			compatible = false
+		}
+		deps = append(deps, ModDependency{
+			ProjectID: d.ProjectID, Title: title, Type: dt,
+			Installed: isInstalled, Missing: missing,
+		})
+	}
+	msg := ""
+	if !compatible {
+		msg = "Missing required dependencies or incompatible mods are installed"
+	}
+	return ModInstallPreview{
+		Title: project.Title, Version: ver.VersionNumber, ProjectID: projectID,
+		Dependencies: deps, Compatible: compatible, Message: msg,
+	}, nil
+}
+
+// PreviewModUpdates lists managed mods that have a newer compatible version.
+func (m *Manager) PreviewModUpdates(ctx context.Context, id string) (ModUpdatePreview, error) {
+	list, err := m.ListMods(ctx, id, true)
+	if err != nil {
+		return ModUpdatePreview{}, err
+	}
+	updates := []ModEntry{}
+	for _, e := range list {
+		if e.UpdateAvailable && !e.Disabled {
+			updates = append(updates, e)
+		}
+	}
+	return ModUpdatePreview{Updates: updates, Count: len(updates)}, nil
+}
+
+// UpdateAllMods installs every available mod update. Returns how many succeeded.
+func (m *Manager) UpdateAllMods(ctx context.Context, id string) (updated int, err error) {
+	preview, err := m.PreviewModUpdates(ctx, id)
+	if err != nil {
+		return 0, err
+	}
+	var lastErr error
+	for _, e := range preview.Updates {
+		if _, ierr := m.InstallMod(ctx, id, e.ProjectID); ierr != nil {
+			lastErr = ierr
+			continue
+		}
+		updated++
+	}
+	if updated == 0 && lastErr != nil {
+		return 0, lastErr
+	}
+	return updated, nil
 }
 
 // ModsDirFor exposes the mods directory for the upload handler.

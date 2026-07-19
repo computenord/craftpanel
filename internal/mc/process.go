@@ -65,6 +65,11 @@ type Proc struct {
 	ringNext  int
 	ringCount int
 	subs      map[chan Event]struct{}
+
+	// Isolation mode for the next Start (Linux): "", "systemd", "docker".
+	isolation string
+	unitID    string // used for systemd unit / docker container name
+	memoryMB  int
 }
 
 func NewProc(ctlDir, dataDir string) *Proc {
@@ -98,6 +103,15 @@ func (p *Proc) SetExitHook(hook func(crashed bool, uptime time.Duration)) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.exitHook = hook
+}
+
+// SetIsolation configures sandboxing for the next Start call (Linux only).
+func (p *Proc) SetIsolation(mode, unitID string, memoryMB int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.isolation = mode
+	p.unitID = unitID
+	p.memoryMB = memoryMB
 }
 
 // SetStopCommand overrides the console command used for graceful stops

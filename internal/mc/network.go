@@ -57,8 +57,102 @@ try = []
 %s
 
 [advanced]
+# craftpanel:proxy-protocol:start
+proxy-protocol = false
+# craftpanel:proxy-protocol:end
 `, port, sanitizeMOTD(name), serversBlockTop, serversBlockEnd, forcedBlockTop, forcedBlockEnd)
 	return fsutil.WriteFileAtomic(filepath.Join(dataDir, velocityConfig), []byte(toml), 0o644)
+}
+
+const (
+	proxyProtoTop = "# craftpanel:proxy-protocol:start"
+	proxyProtoEnd = "# craftpanel:proxy-protocol:end"
+)
+
+func applyVelocityProxyProtocol(dataDir string, enabled bool) error {
+	path := filepath.Join(dataDir, velocityConfig)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	block := fmt.Sprintf("%s\nproxy-protocol = %v\n%s", proxyProtoTop, enabled, proxyProtoEnd)
+	content := string(raw)
+	if strings.Contains(content, proxyProtoTop) {
+		content = spliceBlock(content, proxyProtoTop, proxyProtoEnd, block)
+	} else if idx := strings.Index(content, "[advanced]"); idx >= 0 {
+		// Insert after [advanced] line.
+		rest := content[idx:]
+		nl := strings.Index(rest, "\n")
+		if nl < 0 {
+			content += "\n" + block + "\n"
+		} else {
+			insertAt := idx + nl + 1
+			content = content[:insertAt] + block + "\n" + content[insertAt:]
+		}
+	} else {
+		content = strings.TrimRight(content, "\n") + "\n\n[advanced]\n" + block + "\n"
+	}
+	return fsutil.WriteFileAtomic(path, []byte(content), 0o644)
+}
+
+func patchPaperProxyProtocol(dataDir string, enabled bool) error {
+	cfgDir := filepath.Join(dataDir, "config")
+	path := filepath.Join(cfgDir, "paper-global.yml")
+	raw, err := os.ReadFile(path)
+	val := "false"
+	if enabled {
+		val = "true"
+	}
+	if os.IsNotExist(err) {
+		if err := os.MkdirAll(cfgDir, 0o750); err != nil {
+			return err
+		}
+		minimal := fmt.Sprintf("proxies:\n  proxy-protocol: %s\n", val)
+		return fsutil.WriteFileAtomic(path, []byte(minimal), 0o644)
+	}
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	found := false
+	inProxies := false
+	proxiesIndent := 0
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if trimmed == "proxies:" {
+			inProxies = true
+			proxiesIndent = indent
+			continue
+		}
+		if inProxies {
+			if trimmed != "" && !strings.HasPrefix(trimmed, "#") && indent <= proxiesIndent {
+				inProxies = false
+			} else if strings.HasPrefix(trimmed, "proxy-protocol:") {
+				lines[i] = strings.Repeat(" ", proxiesIndent+2) + "proxy-protocol: " + val
+				found = true
+			}
+		}
+	}
+	if !found {
+		content := strings.TrimRight(strings.Join(lines, "\n"), "\n")
+		if strings.Contains(content, "proxies:") {
+			content += fmt.Sprintf("\n  proxy-protocol: %s\n", val)
+		} else {
+			content += fmt.Sprintf("\nproxies:\n  proxy-protocol: %s\n", val)
+		}
+		return fsutil.WriteFileAtomic(path, []byte(content), 0o644)
+	}
+	return fsutil.WriteFileAtomic(path, []byte(strings.Join(lines, "\n")), 0o644)
+}
+
+func isPaperFamily(typ string) bool {
+	switch typ {
+	case TypePaper, TypePurpur, TypeFolia:
+		return true
+	default:
+		return false
+	}
 }
 
 // spliceBlock replaces the marker-delimited managed section of a config
@@ -150,13 +244,15 @@ type NetworkInfo struct {
 	// Domain is the panel's base domain; linked backends are reachable at
 	// <id>.<Domain> via forced hosts. DNSManaged reports whether the panel
 	// also maintains SRV records, which makes the proxy port irrelevant.
-	Domain     string `json:"domain,omitempty"`
-	ProxyPort  int    `json:"proxyPort"`
-	DNSManaged bool   `json:"dnsManaged"`
+	Domain        string   `json:"domain,omitempty"`
+	ProxyPort     int      `json:"proxyPort"`
+	DNSManaged    bool     `json:"dnsManaged"`
+	ProxyProtocol bool     `json:"proxyProtocol"`
+	Hints         []string `json:"hints,omitempty"`
 }
 
-// Network lists the Paper servers on this host and whether they are wired to
-// the given Velocity proxy.
+// Network lists Paper-family servers on this host and whether they are wired
+// to the given Velocity proxy.
 func (m *Manager) Network(id string) (NetworkInfo, error) {
 	srv, err := m.get(id)
 	if err != nil {
@@ -168,6 +264,7 @@ func (m *Manager) Network(id string) (NetworkInfo, error) {
 	linked := map[string]bool{}
 	srv.mu.Lock()
 	proxyPort := srv.meta.Port
+	proxyProto := srv.meta.ProxyProtocol
 	for _, l := range srv.meta.NetworkServers {
 		linked[l] = true
 	}
@@ -175,15 +272,15 @@ func (m *Manager) Network(id string) (NetworkInfo, error) {
 
 	st := m.Settings()
 	info := NetworkInfo{
-		Backends:   []NetworkBackend{},
-		Domain:     st.Domain,
-		ProxyPort:  proxyPort,
-		DNSManaged: dnsConfigured(st),
+		Backends:      []NetworkBackend{},
+		Domain:        st.Domain,
+		ProxyPort:     proxyPort,
+		DNSManaged:    dnsConfigured(st),
+		ProxyProtocol: proxyProto,
+		Hints:         proxyHints(proxyProto, st.Domain, proxyPort),
 	}
 	for _, v := range m.List() {
-		// Modern forwarding needs Paper; Vanilla and Bedrock cannot join a
-		// Velocity network this way.
-		if v.Type != TypePaper {
+		if !isPaperFamily(v.Type) {
 			continue
 		}
 		info.Backends = append(info.Backends, NetworkBackend{
@@ -194,10 +291,29 @@ func (m *Manager) Network(id string) (NetworkInfo, error) {
 	return info, nil
 }
 
-// SetNetwork wires the chosen Paper servers to the proxy: velocity.toml gets
-// the server list, every chosen backend gets the forwarding secret and
+func proxyHints(proxyProtocol bool, domain string, proxyPort int) []string {
+	hints := []string{
+		"Put the panel behind a reverse proxy with WebSocket support for the live console (SSE).",
+		"Forward X-Forwarded-Proto and (only from trusted proxies) X-Forwarded-For; run craftpanel with -behind-proxy.",
+	}
+	if domain != "" {
+		hints = append(hints, "Players can use <server>."+domain+" when forced-hosts and DNS are configured.")
+	}
+	if proxyPort != 25565 && !proxyProtocol {
+		hints = append(hints, fmt.Sprintf("Proxy listens on %d — players must use that port unless you have SRV records.", proxyPort))
+	}
+	if proxyProtocol {
+		hints = append(hints, "PROXY protocol is on: your TCP load balancer must send PROXY v1/v2; direct player connects will fail.")
+	} else {
+		hints = append(hints, "Enable PROXY protocol only when a TCP proxy (HAProxy/Nginx stream) sits in front of Velocity.")
+	}
+	return hints
+}
+
+// SetNetwork wires the chosen Paper-family servers to the proxy: velocity.toml
+// gets the server list, every chosen backend gets the forwarding secret and
 // online-mode=false. Returns human readable warnings (restart reminders).
-func (m *Manager) SetNetwork(id string, serverIDs []string) ([]string, error) {
+func (m *Manager) SetNetwork(id string, serverIDs []string, proxyProtocol *bool) ([]string, error) {
 	srv, err := m.get(id)
 	if err != nil {
 		return nil, err
@@ -231,8 +347,8 @@ func (m *Manager) SetNetwork(id string, serverIDs []string) ([]string, error) {
 		b.mu.Lock()
 		typ, port := b.meta.Type, b.meta.Port
 		b.mu.Unlock()
-		if typ != TypePaper {
-			return nil, fmt.Errorf("server %q is not a paper server", sid)
+		if !isPaperFamily(typ) {
+			return nil, fmt.Errorf("server %q is not a Paper/Purpur/Folia server", sid)
 		}
 		backends = append(backends, backend{id: sid, port: port, srv: b})
 	}
@@ -282,10 +398,22 @@ func (m *Manager) SetNetwork(id string, serverIDs []string) ([]string, error) {
 
 	srv.mu.Lock()
 	srv.meta.NetworkServers = backendIDs
+	if proxyProtocol != nil {
+		srv.meta.ProxyProtocol = *proxyProtocol
+	}
+	proxyOn := srv.meta.ProxyProtocol
 	err = fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta)
 	srv.mu.Unlock()
 	if err != nil {
 		return warnings, err
+	}
+	if err := applyVelocityProxyProtocol(srv.DataDir(), proxyOn); err != nil {
+		warnings = append(warnings, "velocity proxy-protocol not updated: "+err.Error())
+	}
+	for _, b := range backends {
+		if err := patchPaperProxyProtocol(b.srv.DataDir(), proxyOn); err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: proxy-protocol not updated: %v", b.id, err))
+		}
 	}
 	// Proxy membership changes which port the backends' SRV records point at.
 	m.TriggerDNSSync("network changed")

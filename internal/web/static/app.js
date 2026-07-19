@@ -4,6 +4,7 @@
 const $app = document.getElementById("app");
 
 let me = null;
+let meAdmin = false;
 let meTotp = false;
 let sys = null;
 let pollTimer = null;
@@ -188,6 +189,7 @@ async function boot() {
   try {
     const info = await api("/api/me", { noAuthRedirect: true });
     me = info.username;
+    meAdmin = !!info.admin;
     meTotp = !!info.totp;
   } catch {
     return renderLogin();
@@ -229,9 +231,11 @@ function renderLogin() {
         body: { username: f.username.value.trim(), password: f.password.value, code: f.code.value.trim() }
       });
       me = data.username;
-      meTotp = true; // refreshed on next boot; only used for the settings modal
       const info = await api("/api/me").catch(() => null);
-      if (info) meTotp = !!info.totp;
+      if (info) {
+        meTotp = !!info.totp;
+        meAdmin = !!info.admin;
+      }
       sys = await api("/api/system").catch(() => null);
       renderShellAndRoute();
     } catch (err) {
@@ -363,12 +367,13 @@ async function renderDash() {
   dashCards = new Map();
   const c = content();
   c.innerHTML = `<div class="page-head"><h1>${t("dash.title")}</h1>
-    <button class="btn btn-primary" id="new-server">${ICONS.plus} ${t("dash.new")}</button></div>
+    ${meAdmin ? `<button class="btn btn-primary" id="new-server">${ICONS.plus} ${t("dash.new")}</button>` : ""}</div>
     <div id="update-banner"></div>
     <div id="eula-banner"></div>
     <div id="java-warning"></div>
     <div id="server-grid"></div>`;
-  c.querySelector("#new-server").addEventListener("click", openCreateModal);
+  const newBtn = c.querySelector("#new-server");
+  if (newBtn) newBtn.addEventListener("click", openCreateModal);
   if (sys && sys.updateAvailable && localStorage.getItem("cp_hide_update") !== sys.latest) {
     const b = el(`<div class="notice">${esc(t("update.banner", { v: sys.latest }))}
       <button class="btn btn-ok btn-sm" id="upd-now">${t("update.now")}</button>
@@ -586,6 +591,19 @@ function updateServerCard(card, s) {
 
 async function serverAction(id, action) {
   try {
+    if (action === "start") {
+      try {
+        const pf = await api(`/api/servers/${encodeURIComponent(id)}/preflight`);
+        if (!pf.ok) {
+          const err = (pf.checks || []).find((c) => !c.ok && c.level === "error");
+          throw Object.assign(new Error(err ? err.message : t("preflight.blocked")), { status: 400 });
+        }
+        const warns = (pf.checks || []).filter((c) => c.level === "warn");
+        if (warns.length) toast(warns.map((w) => w.message).join(" · "), "ok");
+      } catch (e) {
+        if (e.status) throw e;
+      }
+    }
     await api(`/api/servers/${encodeURIComponent(id)}/${action}`, { method: "POST", body: {} });
     if (currentDetailId) await updateDetailHead(currentDetailId);
     else await refreshDash();
@@ -601,8 +619,16 @@ const MEM_OPTIONS = [1024, 2048, 4096, 6144, 8192, 12288, 16384];
 function isModdedType(typ) {
   return typ === "fabric" || typ === "forge" || typ === "neoforge" || typ === "quilt";
 }
+function isPluginType(typ) {
+  return typ === "paper" || typ === "purpur" || typ === "folia" || typ === "velocity" || typ === "waterfall";
+}
+function isProxyType(typ) {
+  return typ === "velocity" || typ === "waterfall";
+}
 
 async function openCreateModal() {
+  let settings = {};
+  try { settings = await api("/api/settings"); } catch {}
   const box = el(`<div>
     <h2>${t("create.title")}</h2>
     <form id="create-form">
@@ -611,6 +637,8 @@ async function openCreateModal() {
         <label class="field"><span>${t("create.type")}</span>
           <select name="type">
             <option value="paper">Paper</option>
+            <option value="purpur">Purpur</option>
+            <option value="folia">Folia</option>
             <option value="vanilla">Vanilla</option>
             <option value="fabric">Fabric</option>
             <option value="forge">Forge</option>
@@ -619,13 +647,24 @@ async function openCreateModal() {
             <option value="modpack">${t("create.typeModpack")}</option>
             <option value="bedrock">Bedrock</option>
             <option value="velocity">Velocity (Proxy)</option>
+            <option value="waterfall">Waterfall (Proxy)</option>
           </select>
         </label>
         <label class="field" id="create-version-field"><span>${t("create.version")}</span>
           <select name="version" disabled><option>${t("create.loadingVersions")}</option></select>
         </label>
       </div>
+      <label class="field" id="create-loader-field" hidden><span>${t("create.loaderVersion")}</span>
+        <select name="loaderVersion"><option value="">${t("create.loaderLatest")}</option></select>
+      </label>
       <div id="modpack-picker" hidden>
+        <label class="field"><span>${t("create.modpackSource")}</span>
+          <select id="mp-source">
+            <option value="modrinth">Modrinth</option>
+            <option value="curseforge" ${settings.curseForgeKeySet ? "" : "disabled"}>CurseForge${!settings.curseForgeKeySet ? " (" + t("create.cfKeyMissing") + ")" : ""}</option>
+            <option value="all">${t("create.modpackSourceAll")}</option>
+          </select>
+        </label>
         <label class="field"><span>${t("create.modpackSearch")}</span>
           <div class="form-row">
             <input type="text" id="mp-query" placeholder="${esc(t("create.modpackPlaceholder"))}">
@@ -636,7 +675,9 @@ async function openCreateModal() {
         <label class="field" id="mp-version-field" hidden><span>${t("create.modpackVersion")}</span>
           <select id="mp-version"></select>
         </label>
+        <p class="hint" id="mp-analyze" hidden></p>
         <input type="hidden" id="mp-project" value="">
+        <input type="hidden" id="mp-hit-source" value="modrinth">
       </div>
       <div class="form-row">
         <label class="field" id="create-mem"><span>${t("create.memory")}</span>
@@ -647,6 +688,7 @@ async function openCreateModal() {
           <input type="number" name="port" min="1024" max="65535" placeholder="${t("create.portAuto")}">
         </label>
       </div>
+      <p class="hint" id="create-rec" hidden></p>
       <p class="hint" id="bedrock-hint" hidden>${t("create.bedrockHint")}</p>
       <p class="hint" id="velocity-hint" hidden>${t("create.velocityHint")}</p>
       <p class="hint" id="modded-hint" hidden>${t("create.moddedHint")}</p>
@@ -662,10 +704,30 @@ async function openCreateModal() {
 
   const typeSel = box.querySelector("select[name=type]");
   const verSel = box.querySelector("select[name=version]");
+  const loaderSel = box.querySelector("select[name=loaderVersion]");
   const memSel = box.querySelector("select[name=memoryMB]");
   const mpProject = box.querySelector("#mp-project");
+  const mpHitSource = box.querySelector("#mp-hit-source");
   const mpVersion = box.querySelector("#mp-version");
   const mpResults = box.querySelector("#mp-results");
+  const mpAnalyze = box.querySelector("#mp-analyze");
+  const recHint = box.querySelector("#create-rec");
+
+  async function loadLoaderVersions() {
+    const typ = typeSel.value;
+    if (!isModdedType(typ) || !verSel.value) {
+      box.querySelector("#create-loader-field").hidden = true;
+      return;
+    }
+    box.querySelector("#create-loader-field").hidden = false;
+    loaderSel.innerHTML = `<option value="">${t("create.loaderLatest")}</option>`;
+    try {
+      const list = await api(`/api/loaders?type=${encodeURIComponent(typ)}&version=${encodeURIComponent(verSel.value)}`);
+      list.forEach((v) => {
+        loaderSel.appendChild(el(`<option value="${esc(v.id)}">${esc(v.id)}${v.latest ? " (latest)" : ""}</option>`));
+      });
+    } catch {}
+  }
 
   async function loadVersions() {
     if (typeSel.value === "modpack") return;
@@ -676,39 +738,64 @@ async function openCreateModal() {
       verSel.innerHTML = list.map((v) =>
         `<option value="${esc(v.id)}">${esc(v.id)}${v.latest ? " (latest)" : ""}</option>`).join("");
       verSel.disabled = false;
+      await loadLoaderVersions();
     } catch (e) {
       verSel.innerHTML = `<option value="">?</option>`;
       toastError(e);
     }
   }
 
+  async function analyzeSelected() {
+    if (!mpProject.value || !mpVersion.value) return;
+    mpAnalyze.hidden = false;
+    mpAnalyze.textContent = t("misc.loading");
+    try {
+      const a = await api(`/api/modpacks/analyze?source=${encodeURIComponent(mpHitSource.value)}&project=${encodeURIComponent(mpProject.value)}&version=${encodeURIComponent(mpVersion.value)}`);
+      const badge = a.suitability === "good" ? t("create.packGood") : a.suitability === "mixed" ? t("create.packMixed") : t("create.packClient");
+      mpAnalyze.textContent = `${badge}: ${a.message}`;
+      if (a.suggestedMemoryMB) memSel.value = String(a.suggestedMemoryMB);
+      recHint.hidden = false;
+      recHint.textContent = a.suggestedJavaMajor
+        ? t("create.recHint", { ram: a.suggestedMemoryMB, java: a.suggestedJavaMajor })
+        : t("create.recHintRam", { ram: a.suggestedMemoryMB });
+      if (a.suitability === "client") box.querySelector("#create-submit").disabled = true;
+      else box.querySelector("#create-submit").disabled = false;
+    } catch (e) {
+      mpAnalyze.textContent = e.message || t("error.generic");
+    }
+  }
+
   async function searchModpacks() {
     const q = box.querySelector("#mp-query").value.trim();
+    const source = box.querySelector("#mp-source").value;
     mpResults.innerHTML = `<p class="hint">${t("misc.loading")}</p>`;
     try {
-      const hits = await api(`/api/modpacks/search?q=${encodeURIComponent(q)}&sort=downloads`);
+      const hits = await api(`/api/modpacks/search?q=${encodeURIComponent(q)}&sort=downloads&source=${encodeURIComponent(source)}`);
       if (!hits.length) {
         mpResults.innerHTML = `<p class="hint">${t("create.modpackNoResults")}</p>`;
         return;
       }
       mpResults.innerHTML = "";
       hits.forEach((hit) => {
+        const src = hit.source || "modrinth";
         const row = el(`<div class="plg-hit">
           <div><strong>${esc(hit.title)}</strong>
             <span class="plg-desc">${esc(hit.description || "")}</span>
-            <span class="plg-dl">${(hit.loaders || []).map(esc).join(", ")} · ${hit.downloads.toLocaleString()} ${t("plugins.downloads")}</span>
+            <span class="plg-dl">${esc(src)} · ${(hit.loaders || []).map(esc).join(", ")} · ${hit.downloads.toLocaleString()} ${t("plugins.downloads")}</span>
           </div>
           <button type="button" class="btn btn-sm">${t("create.modpackSelect")}</button>`);
         row.querySelector("button").addEventListener("click", async () => {
           mpProject.value = hit.projectId;
+          mpHitSource.value = src;
           box.querySelector("#mp-version-field").hidden = false;
           mpVersion.innerHTML = `<option>${t("create.loadingVersions")}</option>`;
           try {
-            const vers = await api(`/api/modpacks/${encodeURIComponent(hit.projectId)}/versions`);
+            const vers = await api(`/api/modpacks/${encodeURIComponent(hit.projectId)}/versions?source=${encodeURIComponent(src)}`);
             mpVersion.innerHTML = vers.map((v) =>
               `<option value="${esc(v.id)}">${esc(v.name || v.versionNumber)} (${esc((v.gameVersions || []).join(", "))}${v.loaders && v.loaders.length ? " · " + esc(v.loaders.join(", ")) : ""})</option>`
             ).join("");
             toast(t("create.modpackSelected", { name: hit.title }), "ok");
+            analyzeSelected();
           } catch (e) {
             toastError(e);
           }
@@ -732,6 +819,9 @@ async function openCreateModal() {
     box.querySelector("#velocity-hint").hidden = typ !== "velocity";
     box.querySelector("#modded-hint").hidden = !isModdedType(typ);
     box.querySelector("#modpack-hint").hidden = !modpack;
+    box.querySelector("#create-loader-field").hidden = !isModdedType(typ);
+    recHint.hidden = true;
+    box.querySelector("#create-submit").disabled = false;
     if (modpack && parseInt(memSel.value, 10) < 4096) memSel.value = "4096";
     else if (isModdedType(typ) && parseInt(memSel.value, 10) < 2048) memSel.value = "2048";
   };
@@ -740,6 +830,8 @@ async function openCreateModal() {
     loadVersions();
     if (typeSel.value === "modpack" && !mpResults.childElementCount) searchModpacks();
   });
+  verSel.addEventListener("change", loadLoaderVersions);
+  mpVersion.addEventListener("change", analyzeSelected);
   box.querySelector("#mp-search").addEventListener("click", searchModpacks);
   box.querySelector("#mp-query").addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); searchModpacks(); }
@@ -765,8 +857,12 @@ async function openCreateModal() {
         }
         body.modpackProject = mpProject.value;
         body.modpackVersion = mpVersion.value;
+        body.modpackSource = mpHitSource.value;
       } else {
         body.version = f.version.value;
+        if (isModdedType(f.type.value) && f.loaderVersion.value) {
+          body.loaderVersion = f.loaderVersion.value;
+        }
       }
       const created = await api("/api/servers", { method: "POST", body });
       closeModal();
@@ -795,10 +891,11 @@ async function renderDetail(id, tab) {
     <div id="detail-head"></div>
     <nav class="tabs" id="tabs">
       <button data-tab="console">${t("tabs.console")}</button>
-      ${s.type === "velocity" ? "" : `<button data-tab="players">${t("tabs.players")}</button>`}
+      ${isProxyType(s.type) ? "" : `<button data-tab="players">${t("tabs.players")}</button>`}
       ${s.type === "velocity" ? `<button data-tab="network">${t("tabs.network")}</button>` : ""}
-      ${s.type === "paper" || s.type === "velocity" ? `<button data-tab="plugins">${t("tabs.plugins")}</button>` : ""}
+      ${isPluginType(s.type) ? `<button data-tab="plugins">${t("tabs.plugins")}</button>` : ""}
       ${isModdedType(s.type) ? `<button data-tab="mods">${t("tabs.mods")}</button>` : ""}
+      ${s.type !== "bedrock" && !isProxyType(s.type) ? `<button data-tab="datapacks">${t("tabs.datapacks")}</button>` : ""}
       <button data-tab="files">${t("tabs.files")}</button>
       <button data-tab="backups">${t("tabs.backups")}</button>
       <button data-tab="settings">${t("tabs.settings")}</button>
@@ -811,12 +908,12 @@ async function renderDetail(id, tab) {
       location.hash = `#/server/${encodeURIComponent(id)}/${b.dataset.tab}`;
     });
   });
-  const plugins = s.type === "paper" || s.type === "velocity";
   if (tab === "files") renderFilesTab(id);
-  else if (tab === "players" && s.type !== "velocity") renderPlayersTab(id);
+  else if (tab === "players" && !isProxyType(s.type)) renderPlayersTab(id);
   else if (tab === "network" && s.type === "velocity") renderNetworkTab(id);
-  else if (tab === "plugins" && plugins) renderPluginsTab(id);
+  else if (tab === "plugins" && isPluginType(s.type)) renderPluginsTab(id);
   else if (tab === "mods" && isModdedType(s.type)) renderModsTab(id);
+  else if (tab === "datapacks" && s.type !== "bedrock" && !isProxyType(s.type)) renderDatapacksTab(id);
   else if (tab === "backups") renderBackupsTab(id);
   else if (tab === "settings") renderSettingsTab(id, s);
   else renderConsoleTab(id, s);
@@ -1539,6 +1636,7 @@ function renderModsTab(id) {
       <p class="hint">${t("mods.hint")}</p>
       <div class="files-bar">
         <button class="btn btn-sm btn-primary" id="mod-upload">${ICONS.upload} ${t("mods.upload")}</button>
+        <button class="btn btn-sm" id="mod-update-all">${t("mods.updateAll")}</button>
         <input type="file" id="mod-file" accept=".jar" multiple hidden>
       </div>
       <div id="mod-list">${t("misc.loading")}</div>
@@ -1562,6 +1660,16 @@ function renderModsTab(id) {
 
   const fileInput = body.querySelector("#mod-file");
   body.querySelector("#mod-upload").addEventListener("click", () => fileInput.click());
+  body.querySelector("#mod-update-all").addEventListener("click", async () => {
+    try {
+      const preview = await api(`/api/servers/${encodeURIComponent(id)}/mods/updates`);
+      if (!preview.count) { toast(t("mods.noUpdates"), "ok"); return; }
+      if (!(await confirmModal(t("mods.updateAllConfirm", { n: preview.count }), false))) return;
+      const res = await api(`/api/servers/${encodeURIComponent(id)}/mods/update-all`, { method: "POST", body: {} });
+      toast(t("mods.updateAllOk", { n: res.updated }), "ok");
+      loadModList(id);
+    } catch (e) { toastError(e); }
+  });
   fileInput.addEventListener("change", async () => {
     for (const file of fileInput.files) {
       const fd = new FormData();
@@ -1611,6 +1719,23 @@ function renderModsTab(id) {
           btn.disabled = true;
           btn.textContent = t("misc.loading");
           try {
+            const preview = await api(`/api/servers/${encodeURIComponent(id)}/mods/preview?projectId=${encodeURIComponent(hit.projectId)}`);
+            const missing = (preview.dependencies || []).filter((d) => d.missing);
+            if (missing.length) {
+              const names = missing.map((d) => d.title || d.projectId).join(", ");
+              if (!(await confirmModal(t("mods.depsConfirm", { deps: names }), false))) {
+                btn.disabled = false;
+                btn.textContent = t("mods.install");
+                return;
+              }
+            }
+            if (preview.message && !preview.compatible) {
+              if (!(await confirmModal(preview.message + " — " + t("mods.installAnyway"), false))) {
+                btn.disabled = false;
+                btn.textContent = t("mods.install");
+                return;
+              }
+            }
             const entry = await api(`/api/servers/${encodeURIComponent(id)}/mods/install`,
               { method: "POST", body: { projectId: hit.projectId } });
             toast(t("mods.installedOk", { name: entry.title, v: entry.version }), "ok");
@@ -1656,12 +1781,13 @@ async function loadModList(id) {
     const label = p.title ? `<b>${esc(p.title)}</b> <span class="plg-desc">${esc(p.file)}</span>` : esc(p.file);
     const li = el(`<li>
       <span class="pname">${label}
+        ${p.disabled ? `<span class="badge">${t("mods.disabled")}</span>` : ""}
         ${p.version ? `<span class="badge">${esc(p.version)}</span>` : `<span class="plg-desc">${t("mods.manual")}</span>`}
         <span class="plg-dl">${fmtSize(p.size)}</span></span>
       <span class="pacts"></span>
     </li>`);
     const acts = li.querySelector(".pacts");
-    if (p.updateAvailable) {
+    if (p.updateAvailable && !p.disabled) {
       const up = el(`<button class="btn btn-sm btn-ok">${esc(t("mods.update", { v: p.newVersion }))}</button>`);
       up.addEventListener("click", async () => {
         up.disabled = true;
@@ -1678,12 +1804,138 @@ async function loadModList(id) {
       });
       acts.appendChild(up);
     }
+    const tog = el(`<button class="btn btn-sm">${p.disabled ? t("mods.enable") : t("mods.disable")}</button>`);
+    tog.addEventListener("click", async () => {
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/mods/enable`, {
+          method: "POST", body: { file: p.file, enabled: !!p.disabled }
+        });
+        loadModList(id);
+      } catch (e) { toastError(e); }
+    });
+    acts.appendChild(tog);
     const del = el(`<button class="btn btn-sm btn-danger">${t("files.delete")}</button>`);
     del.addEventListener("click", async () => {
       if (!(await confirmModal(t("mods.deleteConfirm", { name: p.title || p.file }), true))) return;
       try {
         await api(`/api/servers/${encodeURIComponent(id)}/mods?file=${encodeURIComponent(p.file)}`, { method: "DELETE" });
         loadModList(id);
+      } catch (e) { toastError(e); }
+    });
+    acts.appendChild(del);
+    ul.appendChild(li);
+  }
+}
+
+function renderDatapacksTab(id) {
+  const body = document.getElementById("tab-body");
+  body.innerHTML = `
+    <div class="panel">
+      <h2>${t("datapacks.installed")}</h2>
+      <p class="hint">${t("datapacks.hint")}</p>
+      <div class="files-bar">
+        <button class="btn btn-sm btn-primary" id="dp-upload">${ICONS.upload} ${t("datapacks.upload")}</button>
+        <input type="file" id="dp-file" accept=".zip" multiple hidden>
+      </div>
+      <div id="dp-list">${t("misc.loading")}</div>
+    </div>
+    <div class="panel">
+      <h2>${t("datapacks.search")}</h2>
+      <div class="add-row">
+        <input type="text" id="dp-query" placeholder="${esc(t("datapacks.searchPlaceholder"))}">
+        <button class="btn btn-sm btn-primary" id="dp-go">${t("datapacks.searchBtn")}</button>
+      </div>
+      <div id="dp-results"></div>
+    </div>`;
+  const fileInput = body.querySelector("#dp-file");
+  body.querySelector("#dp-upload").addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", async () => {
+    for (const file of fileInput.files) {
+      const fd = new FormData();
+      fd.append("file", file);
+      try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(id)}/datapacks/upload`,
+          { method: "POST", headers: { "X-Craftpanel": "1" }, body: fd });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw Object.assign(new Error(data.message || res.statusText), { code: data.error });
+        }
+        toast(t("files.uploaded") + ": " + file.name, "ok");
+      } catch (e) { toastError(e); }
+    }
+    fileInput.value = "";
+    loadDatapackList(id);
+  });
+  const doSearch = async () => {
+    const q = body.querySelector("#dp-query").value.trim();
+    const host = body.querySelector("#dp-results");
+    host.innerHTML = `<p class="hint">${t("misc.loading")}</p>`;
+    try {
+      const hits = await api(`/api/servers/${encodeURIComponent(id)}/datapacks/search?q=${encodeURIComponent(q)}`);
+      if (!hits.length) { host.innerHTML = `<p class="hint">${t("datapacks.noResults")}</p>`; return; }
+      host.innerHTML = `<ul class="plist"></ul>`;
+      const ul = host.querySelector("ul");
+      for (const hit of hits) {
+        const li = el(`<li class="plg-hit"><span class="pname"><b>${esc(hit.title)}</b>
+          <span class="plg-desc">${esc(hit.description)}</span></span><span class="pacts"></span></li>`);
+        const btn = el(`<button class="btn btn-sm ${hit.installed ? "" : "btn-ok"}" ${hit.installed ? "disabled" : ""}>
+          ${hit.installed ? t("datapacks.alreadyInstalled") : t("datapacks.install")}</button>`);
+        if (!hit.installed) {
+          btn.addEventListener("click", async () => {
+            btn.disabled = true;
+            try {
+              const entry = await api(`/api/servers/${encodeURIComponent(id)}/datapacks/install`,
+                { method: "POST", body: { projectId: hit.projectId } });
+              toast(t("datapacks.installedOk", { name: entry.title, v: entry.version }), "ok");
+              loadDatapackList(id);
+              btn.textContent = t("datapacks.alreadyInstalled");
+            } catch (e) { btn.disabled = false; toastError(e); }
+          });
+        }
+        li.querySelector(".pacts").appendChild(btn);
+        ul.appendChild(li);
+      }
+    } catch (e) { host.innerHTML = ""; toastError(e); }
+  };
+  body.querySelector("#dp-go").addEventListener("click", doSearch);
+  body.querySelector("#dp-query").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); doSearch(); }
+  });
+  doSearch();
+  loadDatapackList(id);
+}
+
+async function loadDatapackList(id) {
+  const host = document.getElementById("dp-list");
+  if (!host) return;
+  let list;
+  try { list = await api(`/api/servers/${encodeURIComponent(id)}/datapacks?check=1`); }
+  catch (e) { host.innerHTML = ""; toastError(e); return; }
+  if (!list.length) { host.innerHTML = `<p class="hint">${t("datapacks.none")}</p>`; return; }
+  host.innerHTML = `<ul class="plist"></ul>`;
+  const ul = host.querySelector("ul");
+  for (const p of list) {
+    const li = el(`<li><span class="pname"><b>${esc(p.title || p.file)}</b>
+      ${p.disabled ? `<span class="badge">${t("mods.disabled")}</span>` : ""}
+      ${p.version ? `<span class="badge">${esc(p.version)}</span>` : ""}
+      <span class="plg-dl">${fmtSize(p.size)}</span></span><span class="pacts"></span></li>`);
+    const acts = li.querySelector(".pacts");
+    const tog = el(`<button class="btn btn-sm">${p.disabled ? t("mods.enable") : t("mods.disable")}</button>`);
+    tog.addEventListener("click", async () => {
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/datapacks/enable`, {
+          method: "POST", body: { file: p.file, enabled: !!p.disabled }
+        });
+        loadDatapackList(id);
+      } catch (e) { toastError(e); }
+    });
+    acts.appendChild(tog);
+    const del = el(`<button class="btn btn-sm btn-danger">${t("files.delete")}</button>`);
+    del.addEventListener("click", async () => {
+      if (!(await confirmModal(t("datapacks.deleteConfirm", { name: p.title || p.file }), true))) return;
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/datapacks?file=${encodeURIComponent(p.file)}`, { method: "DELETE" });
+        loadDatapackList(id);
       } catch (e) { toastError(e); }
     });
     acts.appendChild(del);
@@ -1806,6 +2058,20 @@ async function loadBackups(id) {
         loadBackups(id);
       } catch (e) { toastError(e); }
     });
+    if (meAdmin) {
+      btn(ICONS.plus, t("clone.fromBackup"), async () => {
+        const name = prompt(t("create.name"));
+        if (!name) return;
+        try {
+          const view = await api("/api/servers/from-backup", {
+            method: "POST",
+            body: { sourceId: id, backupName: b.name, name }
+          });
+          toast(t("clone.ok"), "ok");
+          location.hash = `#/server/${encodeURIComponent(view.id)}/console`;
+        } catch (e) { toastError(e); }
+      });
+    }
     btn(ICONS.trash, t("files.delete"), async () => {
       if (!(await confirmModal(t("backup.deleteConfirm", { name: b.name }), true))) return;
       try {
@@ -1845,6 +2111,13 @@ async function renderSettingsTab(id, s) {
           <span>${t("settings.autostart")}</span></label>
         <label class="check"><input type="checkbox" name="restartOnCrash" ${s.restartOnCrash ? "checked" : ""}>
           <span>${t("settings.restartOnCrash")}</span></label>
+        <label class="field"><span>${t("isolation.title")}</span>
+          <select name="isolation">
+            <option value="none" ${!s.isolation ? "selected" : ""}>${t("isolation.none")}</option>
+            <option value="systemd" ${s.isolation === "systemd" ? "selected" : ""}>systemd</option>
+            <option value="docker" ${s.isolation === "docker" ? "selected" : ""}>docker</option>
+          </select></label>
+        <p class="hint">${t("isolation.hint")}</p>
         <button class="btn btn-primary" type="submit">${t("settings.save")}</button>
       </form>
     </div>
@@ -1870,13 +2143,18 @@ async function renderSettingsTab(id, s) {
       <h2>${t("modpack.infoTitle")}</h2>
       <p class="hint">${t("modpack.infoHint")}</p>
       <p><b>${esc(s.modpack.title || s.modpack.slug || "")}</b>
-        ${s.modpack.version ? `<span class="badge">${esc(s.modpack.version)}</span>` : ""}</p>
+        ${s.modpack.version ? `<span class="badge">${esc(s.modpack.version)}</span>` : ""}
+        ${s.modpack.source ? `<span class="badge">${esc(s.modpack.source)}</span>` : ""}</p>
       <p class="hint">${esc(s.type)} ${esc(s.version)}${s.loaderVersion ? " · loader " + esc(s.loaderVersion) : ""}</p>
       <div class="form-row">
         <label class="field"><span>${t("modpack.changeVersion")}</span>
           <select id="mp-up-version"><option>${t("create.loadingVersions")}</option></select></label>
       </div>
-      <button class="btn" id="mp-up-btn">${ICONS.restart} ${t("modpack.upgrade")}</button>
+      <div class="files-bar">
+        <button class="btn" id="mp-up-btn">${ICONS.restart} ${t("modpack.upgrade")}</button>
+        <button class="btn btn-sm" id="mp-client-copy">${t("modpack.copyClient")}</button>
+      </div>
+      <pre class="hint" id="mp-client-text" style="white-space:pre-wrap"></pre>
     </div>` : `<div class="panel">
       <h2>${t("upgrade.title")}</h2>
       <p class="hint">${t("upgrade.hint")}</p>
@@ -1897,7 +2175,8 @@ async function renderSettingsTab(id, s) {
       <p class="hint">${t("discord.hint")}</p>
       <form id="dc-form">
         <label class="field"><span>${t("discord.webhook")}</span>
-          <input type="text" name="webhook" value="${esc((s.discord && s.discord.webhook) || "")}" placeholder="https://discord.com/api/webhooks/..."></label>
+          <input type="text" name="webhook" value="${esc((s.discord && s.discord.webhook) || "")}" placeholder="https://discord.com/api/webhooks/... or https://..."></label>
+        <p class="hint">${t("discord.webhookHint")}</p>
         <label class="field"><span>${t("discord.lang")}</span>
           <select name="lang">
             <option value="de" ${s.discord && s.discord.lang === "de" ? "selected" : ""}>Deutsch</option>
@@ -1920,7 +2199,58 @@ async function renderSettingsTab(id, s) {
       </form>
     </div>
 
-    ${s.type === "velocity" ? "" : `<div class="panel">
+    <div class="panel">
+      <h2>${t("schedCmd.title")}</h2>
+      <p class="hint">${t("schedCmd.hint")}</p>
+      <div id="sched-list"></div>
+      <div class="form-row">
+        <label class="field"><span>${t("schedCmd.time")}</span>
+          <input type="time" id="sched-time" value="12:00"></label>
+        <label class="field"><span>${t("schedCmd.command")}</span>
+          <input type="text" id="sched-cmd" placeholder="say Hello" maxlength="200"></label>
+      </div>
+      <button class="btn btn-sm" type="button" id="sched-add">${t("schedCmd.add")}</button>
+    </div>
+
+    ${isPluginType(s.type) || isModdedType(s.type) ? `<div class="panel">
+      <h2>${t("geyser.title")}</h2>
+      <p class="hint">${t("geyser.hint")}</p>
+      <div id="geyser-body">${t("misc.loading")}</div>
+      <button class="btn btn-sm" id="geyser-install">${t("geyser.install")}</button>
+    </div>` : ""}
+
+    ${!isProxyType(s.type) ? `<div class="panel">
+      <h2>${t("world.title")}</h2>
+      <p class="hint">${t("world.hint")}</p>
+      <input type="file" id="world-file" accept=".zip,application/zip">
+      <button class="btn btn-sm" id="world-import">${t("world.import")}</button>
+      <a class="btn btn-sm" id="world-download" href="/api/servers/${encodeURIComponent(id)}/world/download">${t("world.download")}</a>
+    </div>
+    <div class="panel">
+      <h2>${t("rpack.title")}</h2>
+      <p class="hint">${t("rpack.hint")}</p>
+      <div id="rpack-body">${t("misc.loading")}</div>
+      <input type="file" id="rpack-file" accept=".zip,application/zip">
+      <label class="check"><input type="checkbox" id="rpack-req"> <span>${t("rpack.required")}</span></label>
+      <button class="btn btn-sm" id="rpack-upload">${t("rpack.upload")}</button>
+      <button class="btn btn-sm btn-ghost" id="rpack-delete">${t("rpack.delete")}</button>
+    </div>` : ""}
+
+    <div class="panel">
+      <h2>${t("metrics.title")}</h2>
+      <p class="hint">${t("metrics.hint")}</p>
+      <pre id="metrics-body" class="hint" style="max-height:160px;overflow:auto;white-space:pre-wrap">${t("misc.loading")}</pre>
+    </div>
+
+    ${meAdmin ? `<div class="panel">
+      <h2>${t("clone.title")}</h2>
+      <p class="hint">${t("clone.hint")}</p>
+      <label class="field"><span>${t("create.name")}</span>
+        <input type="text" id="clone-name" maxlength="40" value="${esc(s.name)} copy"></label>
+      <button class="btn btn-sm" id="clone-btn">${t("clone.button")}</button>
+    </div>` : ""}
+
+    ${s.type === "velocity" || s.type === "waterfall" ? "" : `<div class="panel">
       <h2>${t("props.title")}</h2>
       <p class="hint">${t("props.hint")}</p>
       <div id="props-body">${t("misc.loading")}</div>
@@ -1943,7 +2273,8 @@ async function renderSettingsTab(id, s) {
       const patch = {
         name: f.name.value.trim(),
         autostart: f.autostart.checked,
-        restartOnCrash: f.restartOnCrash.checked
+        restartOnCrash: f.restartOnCrash.checked,
+        isolation: f.isolation ? f.isolation.value : "none"
       };
       if (f.memoryMB) patch.memoryMB = parseInt(f.memoryMB.value, 10);
       if (f.javaPath) patch.javaPath = f.javaPath.value.trim();
@@ -1971,14 +2302,19 @@ async function renderSettingsTab(id, s) {
   if (s.modpack) {
     (async () => {
       const sel = body.querySelector("#mp-up-version");
+      const src = s.modpack.source || "modrinth";
       try {
-        const list = await api(`/api/modpacks/${encodeURIComponent(s.modpack.projectId)}/versions`);
+        const list = await api(`/api/modpacks/${encodeURIComponent(s.modpack.projectId)}/versions?source=${encodeURIComponent(src)}`);
         sel.innerHTML = list.map((v) =>
           `<option value="${esc(v.id)}" ${v.id === s.modpack.versionId ? "selected" : ""}>${esc(v.name || v.versionNumber)} (${esc((v.gameVersions || []).join(", "))}${v.loaders && v.loaders.length ? " · " + esc(v.loaders.join(", ")) : ""})</option>`
         ).join("");
       } catch {
         sel.innerHTML = "<option></option>";
       }
+      try {
+        const info = await api(`/api/servers/${encodeURIComponent(id)}/client-pack`);
+        body.querySelector("#mp-client-text").textContent = info.text || "";
+      } catch {}
     })();
     body.querySelector("#mp-up-btn").addEventListener("click", async () => {
       const v = body.querySelector("#mp-up-version").value;
@@ -1989,6 +2325,13 @@ async function renderSettingsTab(id, s) {
         toast(t("modpack.upgradeStarted"), "ok");
         updateDetailHead(id);
       } catch (e) { toastError(e); }
+    });
+    body.querySelector("#mp-client-copy").addEventListener("click", async () => {
+      const text = body.querySelector("#mp-client-text").textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        toast(t("modpack.copied"), "ok");
+      } catch { toastError(new Error(t("error.generic"))); }
     });
   } else {
     (async () => {
@@ -2056,7 +2399,158 @@ async function renderSettingsTab(id, s) {
     } catch (err) { toastError(err); }
   });
 
-  if (s.type !== "velocity") {
+  // Scheduled console commands
+  let schedCmds = Array.isArray(s.scheduledCommands) ? s.scheduledCommands.slice() : [];
+  const renderSched = () => {
+    const host = body.querySelector("#sched-list");
+    if (!host) return;
+    if (!schedCmds.length) {
+      host.innerHTML = `<p class="hint">${t("schedCmd.empty")}</p>`;
+      return;
+    }
+    host.innerHTML = `<ul class="plist">${schedCmds.map((c, i) =>
+      `<li><label class="check"><input type="checkbox" data-i="${i}" class="sched-en" ${c.enabled ? "checked" : ""}>
+        <span><code>${esc(c.time)}</code> ${esc(c.command)}</span></label>
+        <button class="btn btn-ghost btn-sm sched-del" data-i="${i}">${ICONS.trash}</button></li>`).join("")}</ul>`;
+    host.querySelectorAll(".sched-en").forEach((cb) => {
+      cb.addEventListener("change", async () => {
+        schedCmds[+cb.dataset.i].enabled = cb.checked;
+        await saveSched();
+      });
+    });
+    host.querySelectorAll(".sched-del").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        schedCmds.splice(+btn.dataset.i, 1);
+        await saveSched();
+        renderSched();
+      });
+    });
+  };
+  const saveSched = async () => {
+    try {
+      const updated = await api("/api/servers/" + encodeURIComponent(id), {
+        method: "PATCH", body: { scheduledCommands: schedCmds }
+      });
+      schedCmds = updated.scheduledCommands || [];
+      toast(t("settings.saved"), "ok");
+    } catch (e) { toastError(e); }
+  };
+  renderSched();
+  body.querySelector("#sched-add").addEventListener("click", async () => {
+    const time = body.querySelector("#sched-time").value;
+    const command = body.querySelector("#sched-cmd").value.trim();
+    if (!command) return;
+    schedCmds.push({ id: "cmd-" + Date.now(), time, command, enabled: true });
+    body.querySelector("#sched-cmd").value = "";
+    await saveSched();
+    renderSched();
+  });
+
+  const geyserBody = body.querySelector("#geyser-body");
+  if (geyserBody) {
+    (async () => {
+      try {
+        const st = await api(`/api/servers/${encodeURIComponent(id)}/geyser`);
+        geyserBody.textContent = st.supported
+          ? `Geyser: ${st.geyser ? "✓" : "—"} · Floodgate: ${st.floodgate ? "✓" : "—"}` + (st.hint ? " — " + st.hint : "")
+          : (st.hint || "");
+      } catch (e) { geyserBody.textContent = ""; }
+    })();
+    body.querySelector("#geyser-install").addEventListener("click", async () => {
+      try {
+        const st = await api(`/api/servers/${encodeURIComponent(id)}/geyser`, { method: "POST", body: { floodgate: true } });
+        geyserBody.textContent = `Geyser: ${st.geyser ? "✓" : "—"} · Floodgate: ${st.floodgate ? "✓" : "—"}`;
+        toast(t("geyser.ok"), "ok");
+      } catch (e) { toastError(e); }
+    });
+  }
+
+  const worldBtn = body.querySelector("#world-import");
+  if (worldBtn) {
+    worldBtn.addEventListener("click", async () => {
+      const f = body.querySelector("#world-file").files[0];
+      if (!f) return;
+      if (!(await confirmModal(t("world.confirm"), false))) return;
+      const fd = new FormData();
+      fd.append("file", f);
+      try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(id)}/world/import`, {
+          method: "POST", headers: { "X-Craftpanel": "1" }, body: fd
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw Object.assign(new Error(data.message || res.statusText), { code: data.error });
+        }
+        toast(t("world.ok"), "ok");
+      } catch (e) { toastError(e); }
+    });
+  }
+
+  const rpackBody = body.querySelector("#rpack-body");
+  if (rpackBody) {
+    const refreshRP = async () => {
+      try {
+        const info = await api(`/api/servers/${encodeURIComponent(id)}/resource-pack`);
+        rpackBody.textContent = info.present
+          ? `${fmtSize(info.size)} · SHA1 ${info.sha1 || "—"}`
+          : t("rpack.none");
+      } catch { rpackBody.textContent = ""; }
+    };
+    refreshRP();
+    body.querySelector("#rpack-upload").addEventListener("click", async () => {
+      const f = body.querySelector("#rpack-file").files[0];
+      if (!f) return;
+      const fd = new FormData();
+      fd.append("file", f);
+      if (body.querySelector("#rpack-req").checked) fd.append("required", "true");
+      try {
+        const res = await fetch(`/api/servers/${encodeURIComponent(id)}/resource-pack`, {
+          method: "POST", headers: { "X-Craftpanel": "1" }, body: fd
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw Object.assign(new Error(data.message || res.statusText), { code: data.error });
+        }
+        toast(t("rpack.ok"), "ok");
+        refreshRP();
+      } catch (e) { toastError(e); }
+    });
+    body.querySelector("#rpack-delete").addEventListener("click", async () => {
+      try {
+        await api(`/api/servers/${encodeURIComponent(id)}/resource-pack`, { method: "DELETE" });
+        refreshRP();
+      } catch (e) { toastError(e); }
+    });
+  }
+
+  (async () => {
+    const host = body.querySelector("#metrics-body");
+    if (!host) return;
+    try {
+      const list = await api(`/api/servers/${encodeURIComponent(id)}/metrics`);
+      if (!list.length) { host.textContent = t("metrics.empty"); return; }
+      const recent = list.slice(-24);
+      host.textContent = recent.map((m) => {
+        const d = new Date(m.t);
+        return `${d.toLocaleTimeString()}  CPU ${m.cpu}%  RSS ${m.rss} MB`;
+      }).join("\n");
+    } catch { host.textContent = ""; }
+  })();
+
+  const cloneBtn = body.querySelector("#clone-btn");
+  if (cloneBtn) {
+    cloneBtn.addEventListener("click", async () => {
+      const name = body.querySelector("#clone-name").value.trim();
+      if (!name) return;
+      try {
+        const view = await api(`/api/servers/${encodeURIComponent(id)}/clone`, { method: "POST", body: { name } });
+        toast(t("clone.ok"), "ok");
+        location.hash = `#/server/${encodeURIComponent(view.id)}/settings`;
+      } catch (e) { toastError(e); }
+    });
+  }
+
+  if (!isProxyType(s.type)) {
     loadAccess(id);
     loadProperties(id, s.type);
   }
@@ -2083,13 +2577,7 @@ async function loadNetwork(id) {
     info = await api(`/api/servers/${encodeURIComponent(id)}/network`);
   } catch (e) { host.textContent = ""; toastError(e); return; }
 
-  if (info.backends.length === 0) {
-    host.innerHTML = `<p class="hint">${t("network.noBackends")}</p>`;
-    return;
-  }
-  // With a domain mapping every linked backend gets its own hostname via
-  // forced hosts; players need no port when the proxy listens on 25565 or
-  // the panel manages SRV records.
+  const hints = (info.hints || []).map((h) => `<li class="hint">${esc(h)}</li>`).join("");
   let domainHint = "";
   if (info.domain) {
     domainHint = `<p class="hint">${esc(t("network.domainHint", { domain: info.domain }))}</p>`;
@@ -2097,25 +2585,39 @@ async function loadNetwork(id) {
       domainHint += `<div class="notice">${esc(t("network.domainPortWarn", { port: info.proxyPort }))}</div>`;
     }
   }
-  host.innerHTML = `${domainHint}<ul class="plist" id="net-list"></ul>
+  const backendsHTML = info.backends.length === 0
+    ? `<p class="hint">${t("network.noBackends")}</p>`
+    : `<ul class="plist" id="net-list"></ul>`;
+  host.innerHTML = `${domainHint}
+    <label class="check"><input type="checkbox" id="net-pp" ${info.proxyProtocol ? "checked" : ""}>
+      <span>${t("network.proxyProtocol")}</span></label>
+    <p class="hint">${t("network.proxyProtocolHint")}</p>
+    <ul style="margin:0 0 1rem;padding-left:1.2rem">${hints}</ul>
+    ${backendsHTML}
     <div class="modal-actions"><button class="btn btn-primary" id="net-save">${t("network.save")}</button></div>
     <div id="net-warn"></div>`;
   const ul = host.querySelector("#net-list");
-  for (const b of info.backends) {
-    const mapped = info.domain ? ` <span class="plg-desc">&rarr; ${esc(b.id + "." + info.domain)}</span>` : "";
-    const li = el(`<li>
-      <label class="check" style="margin:0"><input type="checkbox" ${b.linked ? "checked" : ""} data-sid="${esc(b.id)}">
-        <span><b>${esc(b.name)}</b> <span class="plg-desc">${t("misc.port")} ${b.port}</span>${mapped}</span></label>
-    </li>`);
-    ul.appendChild(li);
+  if (ul) {
+    for (const b of info.backends) {
+      const mapped = info.domain ? ` <span class="plg-desc">&rarr; ${esc(b.id + "." + info.domain)}</span>` : "";
+      const li = el(`<li>
+        <label class="check" style="margin:0"><input type="checkbox" ${b.linked ? "checked" : ""} data-sid="${esc(b.id)}">
+          <span><b>${esc(b.name)}</b> <span class="plg-desc">${t("misc.port")} ${b.port}</span>${mapped}</span></label>
+      </li>`);
+      ul.appendChild(li);
+    }
   }
   host.querySelector("#net-save").addEventListener("click", async () => {
-    const servers = [...ul.querySelectorAll("input:checked")].map((i) => i.dataset.sid);
+    const servers = ul ? [...ul.querySelectorAll("input:checked")].map((i) => i.dataset.sid) : [];
     try {
-      const res = await api(`/api/servers/${encodeURIComponent(id)}/network`, { method: "PUT", body: { servers } });
+      const res = await api(`/api/servers/${encodeURIComponent(id)}/network`, {
+        method: "PUT",
+        body: { servers, proxyProtocol: host.querySelector("#net-pp").checked }
+      });
       toast(t("network.saved"), "ok");
       const warnHost = host.querySelector("#net-warn");
       warnHost.innerHTML = (res.warnings || []).map((w) => `<div class="notice">${esc(w)}</div>`).join("");
+      loadNetwork(id);
     } catch (e) { toastError(e); }
   });
 }
@@ -2286,6 +2788,10 @@ async function openPanelSettings() {
     <p class="hint" id="ps-version"></p>
     <label class="field"><span>${t("panel.backupDir")}</span><input type="text" id="ps-backupdir"></label>
     <p class="hint">${esc(t("panel.backupDirHint"))}</p>
+    <label class="field"><span>${t("panel.sftpAddr")}</span><input type="text" id="ps-sftp" placeholder=":2222" autocomplete="off"></label>
+    <p class="hint">${esc(t("panel.sftpHint"))}</p>
+    <label class="field"><span>${t("panel.curseForgeKey")}</span><input type="password" id="ps-cfkey" autocomplete="off"></label>
+    <p class="hint">${esc(t("panel.curseForgeKeyHint"))}</p>
     <hr class="sep-line">
     <h2>${t("panel.domainTitle")}</h2>
     <p class="hint">${esc(t("panel.domainHint"))}</p>
@@ -2310,13 +2816,86 @@ async function openPanelSettings() {
     <hr class="sep-line">
     <h2>${t("totp.title")}</h2>
     <div id="totp-body"></div>
+    ${meAdmin ? `
+    <hr class="sep-line">
+    <h2>${t("users.title")}</h2>
+    <p class="hint">${t("users.hint")}</p>
+    <div id="ps-users"></div>
+    <div class="form-row">
+      <label class="field"><span>${t("login.username")}</span><input id="ps-u-name" maxlength="32"></label>
+      <label class="field"><span>${t("login.password")}</span><input type="password" id="ps-u-pass"></label>
+      <label class="field"><span>${t("users.role")}</span>
+        <select id="ps-u-role"><option value="user">user</option><option value="admin">admin</option></select></label>
+    </div>
+    <button class="btn btn-sm" id="ps-u-add">${t("users.add")}</button>
+    <hr class="sep-line">
+    <h2>${t("tokens.title")}</h2>
+    <p class="hint">${t("tokens.hint")}</p>
+    <div id="ps-tokens"></div>
+    <div class="form-row">
+      <label class="field"><span>${t("tokens.name")}</span><input id="ps-tok-name" maxlength="64"></label>
+      <button class="btn btn-sm" id="ps-tok-add">${t("tokens.create")}</button>
+    </div>
+    <pre id="ps-tok-once" class="hint" style="white-space:pre-wrap"></pre>
+    <hr class="sep-line">
+    <h2>${t("javaMgr.title")}</h2>
+    <p class="hint">${t("javaMgr.hint")}</p>
+    <div id="ps-java"></div>
+    <div class="form-row">
+      <label class="field"><span>${t("javaMgr.major")}</span>
+        <select id="ps-java-maj"><option>17</option><option>21</option><option selected>22</option><option>25</option></select></label>
+      <button class="btn btn-sm" id="ps-java-install">${t("javaMgr.install")}</button>
+    </div>
+    <hr class="sep-line">
+    <h2>${t("templates.title")}</h2>
+    <div id="ps-templates"></div>
+    <hr class="sep-line">
+    <h2>${t("import.title")}</h2>
+    <p class="hint">${t("import.hint")}</p>
+    <label class="field"><span>${t("create.name")}</span><input id="ps-imp-name" maxlength="40"></label>
+    <div class="form-row">
+      <label class="field"><span>${t("create.type")}</span>
+        <select id="ps-imp-type"><option value="paper">Paper</option><option value="purpur">Purpur</option><option value="vanilla">Vanilla</option><option value="fabric">Fabric</option></select></label>
+      <label class="field"><span>${t("create.version")}</span><input id="ps-imp-ver" placeholder="1.21.1"></label>
+    </div>
+    <input type="file" id="ps-imp-file" accept=".zip,application/zip">
+    <button class="btn btn-sm" id="ps-imp-go">${t("import.button")}</button>
+    <hr class="sep-line">
+    <h2>${t("nodes.title")}</h2>
+    <p class="hint">${t("nodes.hint")}</p>
+    <div id="ps-nodes"></div>
+    <div class="form-row">
+      <label class="field"><span>${t("nodes.name")}</span><input id="ps-node-name" maxlength="40" placeholder="node-2"></label>
+      <button class="btn btn-sm btn-primary" id="ps-node-add">${t("nodes.enroll")}</button>
+    </div>
+    <div id="ps-node-join" hidden>
+      <p class="hint">${t("nodes.once")}</p>
+      <pre id="ps-node-once" class="hint" style="white-space:pre-wrap;user-select:all"></pre>
+      <button class="btn btn-sm" type="button" id="ps-node-copy">${t("nodes.copy")}</button>
+    </div>
+    <hr class="sep-line">
+    <h2>${t("audit.title")}</h2>
+    <pre id="ps-audit" class="hint" style="max-height:180px;overflow:auto;white-space:pre-wrap"></pre>
+    ` : `
+    <hr class="sep-line">
+    <h2>${t("tokens.title")}</h2>
+    <p class="hint">${t("tokens.hint")}</p>
+    <div id="ps-tokens"></div>
+    <div class="form-row">
+      <label class="field"><span>${t("tokens.name")}</span><input id="ps-tok-name" maxlength="64"></label>
+      <button class="btn btn-sm" id="ps-tok-add">${t("tokens.create")}</button>
+    </div>
+    <pre id="ps-tok-once" class="hint" style="white-space:pre-wrap"></pre>
+    `}
     <div class="modal-actions"><button class="btn btn-ghost" id="ps-close">${t("misc.close")}</button></div>
   </div>`);
   openModal(box, true);
   renderVersionLine(box);
   box.querySelector("#ps-backupdir").value = settings.backupDir || "";
+  box.querySelector("#ps-sftp").value = settings.sftpAddr || "";
   box.querySelector("#ps-domain").value = settings.domain || "";
   box.querySelector("#ps-dnstarget").value = settings.dnsTarget || "";
+  box.querySelector("#ps-cfkey").placeholder = settings.curseForgeKeySet ? t("panel.curseForgeKeySaved") : "";
   const prov = box.querySelector("#ps-dnsprov");
   prov.value = settings.dnsProvider || "";
 
@@ -2334,15 +2913,20 @@ async function openPanelSettings() {
   box.querySelector("#ps-save").addEventListener("click", async () => {
     const body = {
       backupDir: box.querySelector("#ps-backupdir").value.trim(),
+      sftpAddr: box.querySelector("#ps-sftp").value.trim(),
       domain: box.querySelector("#ps-domain").value.trim(),
       dnsProvider: prov.value,
       dnsTarget: box.querySelector("#ps-dnstarget").value.trim()
     };
     const token = box.querySelector("#ps-dnstoken").value.trim();
     if (token) body.dnsToken = token;
+    const cfKey = box.querySelector("#ps-cfkey").value.trim();
+    if (cfKey) body.curseForgeKey = cfKey;
     try {
       settings = await api("/api/settings", { method: "PUT", body });
       box.querySelector("#ps-dnstoken").value = "";
+      box.querySelector("#ps-cfkey").value = "";
+      box.querySelector("#ps-cfkey").placeholder = settings.curseForgeKeySet ? t("panel.curseForgeKeySaved") : "";
       box.querySelector("#ps-warnings").innerHTML =
         (settings.warnings || []).map((w) => `<div class="notice">${esc(w)}</div>`).join("");
       applyDnsUI();
@@ -2358,6 +2942,261 @@ async function openPanelSettings() {
     } catch (err) { toastError(err); } finally { e.target.disabled = false; }
   });
   renderTotpBody(box.querySelector("#totp-body"));
+
+  const loadTokens = async () => {
+    const host = box.querySelector("#ps-tokens");
+    if (!host) return;
+    try {
+      const list = await api("/api/tokens");
+      host.innerHTML = list.length
+        ? `<ul class="plist">${list.map((tok) =>
+          `<li><span>${esc(tok.name)} <span class="plg-desc">${esc(tok.id)}</span></span>
+            <button class="btn btn-ghost btn-sm tok-del" data-id="${esc(tok.id)}">${ICONS.trash}</button></li>`).join("")}</ul>`
+        : `<p class="hint">${t("tokens.empty")}</p>`;
+      host.querySelectorAll(".tok-del").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          try {
+            await api("/api/tokens/" + encodeURIComponent(btn.dataset.id), { method: "DELETE" });
+            loadTokens();
+          } catch (e) { toastError(e); }
+        });
+      });
+    } catch (e) { host.textContent = ""; }
+  };
+  loadTokens();
+  box.querySelector("#ps-tok-add").addEventListener("click", async () => {
+    const name = box.querySelector("#ps-tok-name").value.trim() || "api";
+    try {
+      const tok = await api("/api/tokens", { method: "POST", body: { name } });
+      box.querySelector("#ps-tok-once").textContent = t("tokens.once") + "\n" + tok.token;
+      box.querySelector("#ps-tok-name").value = "";
+      loadTokens();
+    } catch (e) { toastError(e); }
+  });
+
+  if (meAdmin) {
+    const permKeys = ["view", "console", "files", "control", "settings", "backups", "delete"];
+    let serverList = [];
+    try { serverList = await api("/api/servers"); } catch {}
+    serverList = serverList.filter((s) => !s.nodeId);
+
+    const loadUsers = async () => {
+      const host = box.querySelector("#ps-users");
+      if (!host) return;
+      try {
+        const list = await api("/api/users");
+        host.innerHTML = list.map((u) => {
+          const isAdmin = (u.role || "admin") === "admin";
+          let accessHTML = "";
+          if (!isAdmin) {
+            accessHTML = `<div class="u-access" data-u="${esc(u.username)}" style="margin:.4rem 0 .8rem .5rem">
+              ${serverList.map((s) => {
+                const a = (u.access && u.access[s.id]) || {};
+                return `<div class="hint"><b>${esc(s.name)}</b>
+                  ${permKeys.map((p) =>
+                    `<label class="check" style="display:inline;margin-right:.5rem"><input type="checkbox" data-sid="${esc(s.id)}" data-perm="${p}" ${a[p] ? "checked" : ""}> ${p}</label>`
+                  ).join("")}</div>`;
+              }).join("")}
+              <button class="btn btn-sm u-save-access" data-u="${esc(u.username)}">${t("users.saveAccess")}</button>
+            </div>`;
+          }
+          return `<div class="u-row">
+            <span><b>${esc(u.username)}</b> <span class="badge">${esc(u.role || "admin")}</span>
+            ${u.username === me ? "" : `<button class="btn btn-ghost btn-sm u-del" data-u="${esc(u.username)}">${ICONS.trash}</button>`}</span>
+            ${accessHTML}</div>`;
+        }).join("") || `<p class="hint">${t("users.hint")}</p>`;
+        host.querySelectorAll(".u-del").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            if (!(await confirmModal(t("users.deleteConfirm"), true))) return;
+            try {
+              await api("/api/users/" + encodeURIComponent(btn.dataset.u), { method: "DELETE" });
+              loadUsers();
+            } catch (e) { toastError(e); }
+          });
+        });
+        host.querySelectorAll(".u-save-access").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const wrap = host.querySelector(`.u-access[data-u="${CSS.escape(btn.dataset.u)}"]`);
+            const access = {};
+            wrap.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+              const sid = cb.dataset.sid;
+              if (!access[sid]) access[sid] = {};
+              access[sid][cb.dataset.perm] = cb.checked;
+            });
+            // Ensure view is on if any other perm is on
+            Object.keys(access).forEach((sid) => {
+              const a = access[sid];
+              if (a.console || a.files || a.control || a.settings || a.backups || a.delete) a.view = true;
+              if (!a.view) delete access[sid];
+            });
+            try {
+              await api("/api/users/" + encodeURIComponent(btn.dataset.u), {
+                method: "PATCH", body: { role: "user", access }
+              });
+              toast(t("users.accessSaved"), "ok");
+              loadUsers();
+            } catch (e) { toastError(e); }
+          });
+        });
+      } catch (e) { host.textContent = ""; }
+    };
+    loadUsers();
+    box.querySelector("#ps-u-add").addEventListener("click", async () => {
+      try {
+        await api("/api/users", {
+          method: "POST",
+          body: {
+            username: box.querySelector("#ps-u-name").value.trim(),
+            password: box.querySelector("#ps-u-pass").value,
+            role: box.querySelector("#ps-u-role").value
+          }
+        });
+        box.querySelector("#ps-u-name").value = "";
+        box.querySelector("#ps-u-pass").value = "";
+        loadUsers();
+        toast(t("users.added"), "ok");
+      } catch (e) { toastError(e); }
+    });
+
+    const loadNodes = async () => {
+      const host = box.querySelector("#ps-nodes");
+      if (!host) return;
+      try {
+        const list = await api("/api/nodes");
+        host.innerHTML = list.length
+          ? `<ul class="plist">${list.map((n) =>
+            `<li><span><b>${esc(n.name)}</b> <span class="badge">${n.online ? "online" : "offline"}</span>
+              <span class="plg-desc">${n.serverCount || 0} servers</span></span>
+              <button class="btn btn-ghost btn-sm node-del" data-id="${esc(n.id)}">${ICONS.trash}</button></li>`).join("")}</ul>`
+          : `<p class="hint">${t("nodes.empty")}</p>`;
+        host.querySelectorAll(".node-del").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            try {
+              await api("/api/nodes/" + encodeURIComponent(btn.dataset.id), { method: "DELETE" });
+              loadNodes();
+            } catch (e) { toastError(e); }
+          });
+        });
+      } catch { host.textContent = ""; }
+    };
+    loadNodes();
+    box.querySelector("#ps-node-add").addEventListener("click", async () => {
+      try {
+        const n = await api("/api/nodes", { method: "POST", body: { name: box.querySelector("#ps-node-name").value.trim() || "node" } });
+        const join = n.joinCommand || `curl -fsSL '${location.origin}/api/nodes/bootstrap?token=${n.token}' | sudo bash`;
+        box.querySelector("#ps-node-once").textContent = join;
+        box.querySelector("#ps-node-join").hidden = false;
+        box.querySelector("#ps-node-name").value = "";
+        loadNodes();
+      } catch (e) { toastError(e); }
+    });
+    box.querySelector("#ps-node-copy").addEventListener("click", async () => {
+      const cmd = box.querySelector("#ps-node-once").textContent.trim();
+      try {
+        await navigator.clipboard.writeText(cmd);
+        toast(t("nodes.copied"), "ok");
+      } catch { toastError(new Error(t("error.generic"))); }
+    });
+
+    const loadJava = async () => {
+      const host = box.querySelector("#ps-java");
+      if (!host) return;
+      try {
+        const list = await api("/api/java");
+        host.innerHTML = list.length
+          ? `<ul class="plist">${list.map((j) =>
+            `<li><span>Java ${j.major} <span class="plg-desc">${esc(j.path)}</span></span>
+              <button class="btn btn-ghost btn-sm java-copy" data-p="${esc(j.path)}">${t("javaMgr.usePath")}</button></li>`).join("")}</ul>`
+          : `<p class="hint">${t("javaMgr.empty")}</p>`;
+        host.querySelectorAll(".java-copy").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            try {
+              await navigator.clipboard.writeText(btn.dataset.p);
+              toast(t("javaMgr.copied"), "ok");
+            } catch {}
+          });
+        });
+      } catch { host.textContent = ""; }
+    };
+    loadJava();
+    box.querySelector("#ps-java-install").addEventListener("click", async (e) => {
+      e.target.disabled = true;
+      try {
+        const major = parseInt(box.querySelector("#ps-java-maj").value, 10);
+        await api("/api/java", { method: "POST", body: { major } });
+        toast(t("javaMgr.ok"), "ok");
+        loadJava();
+      } catch (err) { toastError(err); } finally { e.target.disabled = false; }
+    });
+
+    const loadTemplates = async () => {
+      const host = box.querySelector("#ps-templates");
+      if (!host) return;
+      try {
+        const list = await api("/api/templates");
+        host.innerHTML = list.length
+          ? `<ul class="plist">${list.map((tpl) =>
+            `<li><span><b>${esc(tpl.name)}</b> <span class="plg-desc">${esc(tpl.type)} ${esc(tpl.version)}</span></span>
+              <button class="btn btn-sm tpl-use" data-id="${esc(tpl.id)}">${t("templates.use")}</button>
+              <button class="btn btn-ghost btn-sm tpl-del" data-id="${esc(tpl.id)}">${ICONS.trash}</button></li>`).join("")}</ul>`
+          : `<p class="hint">${t("templates.empty")}</p>`;
+        host.querySelectorAll(".tpl-use").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const name = prompt(t("create.name"));
+            if (!name) return;
+            try {
+              const view = await api("/api/servers/from-template", {
+                method: "POST", body: { templateId: btn.dataset.id, name }
+              });
+              closeModal();
+              location.hash = `#/server/${encodeURIComponent(view.id)}/console`;
+            } catch (e) { toastError(e); }
+          });
+        });
+        host.querySelectorAll(".tpl-del").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            try {
+              await api("/api/templates/" + encodeURIComponent(btn.dataset.id), { method: "DELETE" });
+              loadTemplates();
+            } catch (e) { toastError(e); }
+          });
+        });
+      } catch { host.textContent = ""; }
+    };
+    loadTemplates();
+
+    box.querySelector("#ps-imp-go").addEventListener("click", async () => {
+      const f = box.querySelector("#ps-imp-file").files[0];
+      if (!f) return;
+      const fd = new FormData();
+      fd.append("file", f);
+      fd.append("name", box.querySelector("#ps-imp-name").value.trim());
+      fd.append("type", box.querySelector("#ps-imp-type").value);
+      fd.append("version", box.querySelector("#ps-imp-ver").value.trim());
+      try {
+        const res = await fetch("/api/servers/import", {
+          method: "POST", headers: { "X-Craftpanel": "1" }, body: fd
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw Object.assign(new Error(data.message || res.statusText), { code: data.error });
+        closeModal();
+        location.hash = `#/server/${encodeURIComponent(data.id)}/console`;
+      } catch (e) { toastError(e); }
+    });
+
+    (async () => {
+      const host = box.querySelector("#ps-audit");
+      if (!host) return;
+      try {
+        const list = await api("/api/audit?limit=40");
+        host.textContent = list.map((e) =>
+          `${new Date(e.time).toLocaleString()}  ${e.actor}  ${e.action}` +
+          (e.serverId ? `  [${e.serverId}]` : "") +
+          (e.detail ? `  ${e.detail}` : "")
+        ).join("\n") || t("audit.empty");
+      } catch { host.textContent = ""; }
+    })();
+  }
 }
 
 function renderDnsStatus(host, st) {

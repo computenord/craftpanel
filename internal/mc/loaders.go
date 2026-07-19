@@ -18,11 +18,14 @@ import (
 )
 
 const (
-	TypeFabric   = "fabric"
-	TypeForge    = "forge"
-	TypeNeoForge = "neoforge"
-	TypeQuilt    = "quilt"
-	TypeModpack  = "modpack" // create-time only; persisted as the resolved loader
+	TypeFabric    = "fabric"
+	TypeForge     = "forge"
+	TypeNeoForge  = "neoforge"
+	TypeQuilt     = "quilt"
+	TypeModpack   = "modpack" // create-time only; persisted as the resolved loader
+	TypePurpur    = "purpur"
+	TypeFolia     = "folia"
+	TypeWaterfall = "waterfall"
 
 	fabricMetaBase = "https://meta.fabricmc.net/v2"
 	quiltMetaBase  = "https://meta.quiltmc.org/v3"
@@ -43,12 +46,149 @@ func IsModded(typ string) bool {
 
 func validServerType(typ string) bool {
 	switch typ {
-	case TypeVanilla, TypePaper, TypeBedrock, TypeVelocity,
+	case TypeVanilla, TypePaper, TypePurpur, TypeFolia, TypeBedrock, TypeVelocity, TypeWaterfall,
 		TypeFabric, TypeForge, TypeNeoForge, TypeQuilt, TypeModpack:
 		return true
 	default:
 		return false
 	}
+}
+
+// IsPluginServer reports whether the type uses a plugins/ folder (Paper family / proxies).
+func IsPluginServer(typ string) bool {
+	switch typ {
+	case TypePaper, TypePurpur, TypeFolia, TypeVelocity, TypeWaterfall:
+		return true
+	default:
+		return false
+	}
+}
+
+// LoaderVersionInfo is one Fabric/Forge/NeoForge/Quilt loader build for a MC release.
+type LoaderVersionInfo struct {
+	ID     string `json:"id"`
+	Latest bool   `json:"latest,omitempty"`
+}
+
+// ListLoaderVersions lists available loader builds for typ + Minecraft version.
+func (v *Versions) ListLoaderVersions(ctx context.Context, typ, mcVersion string) ([]LoaderVersionInfo, error) {
+	mcVersion = strings.TrimSpace(mcVersion)
+	if mcVersion == "" {
+		return nil, errors.New("minecraft version is required")
+	}
+	switch typ {
+	case TypeFabric:
+		return listFabricLoaderVersions(ctx, fabricMetaBase, mcVersion)
+	case TypeQuilt:
+		return listQuiltLoaderVersions(ctx, mcVersion)
+	case TypeForge:
+		return listForgeLoaderVersions(ctx, mcVersion)
+	case TypeNeoForge:
+		return listNeoForgeLoaderVersions(ctx, mcVersion)
+	default:
+		return nil, fmt.Errorf("loader versions not available for %s", typ)
+	}
+}
+
+func listFabricLoaderVersions(ctx context.Context, metaBase, mcVersion string) ([]LoaderVersionInfo, error) {
+	var loaders []struct {
+		Loader struct {
+			Version string `json:"version"`
+			Stable  bool   `json:"stable"`
+		} `json:"loader"`
+	}
+	if err := getJSON(ctx, metaBase+"/versions/loader/"+url.PathEscape(mcVersion), &loaders); err != nil {
+		return nil, err
+	}
+	out := []LoaderVersionInfo{}
+	for _, l := range loaders {
+		if !l.Loader.Stable {
+			continue
+		}
+		out = append(out, LoaderVersionInfo{ID: l.Loader.Version})
+	}
+	if len(out) == 0 {
+		for _, l := range loaders {
+			out = append(out, LoaderVersionInfo{ID: l.Loader.Version})
+			if len(out) >= 20 {
+				break
+			}
+		}
+	}
+	if len(out) > 0 {
+		out[0].Latest = true
+	}
+	return out, nil
+}
+
+func listQuiltLoaderVersions(ctx context.Context, mcVersion string) ([]LoaderVersionInfo, error) {
+	var loaders []struct {
+		Loader struct {
+			Version string `json:"version"`
+		} `json:"loader"`
+	}
+	if err := getJSON(ctx, quiltMetaBase+"/versions/loader/"+url.PathEscape(mcVersion), &loaders); err != nil {
+		return nil, err
+	}
+	out := make([]LoaderVersionInfo, 0, len(loaders))
+	for i, l := range loaders {
+		if i >= 30 {
+			break
+		}
+		out = append(out, LoaderVersionInfo{ID: l.Loader.Version, Latest: i == 0})
+	}
+	return out, nil
+}
+
+func listForgeLoaderVersions(ctx context.Context, mcVersion string) ([]LoaderVersionInfo, error) {
+	versions, err := fetchMavenVersions(ctx, forgeMavenBase+"/maven-metadata.xml")
+	if err != nil {
+		return nil, err
+	}
+	out := []LoaderVersionInfo{}
+	for i := len(versions) - 1; i >= 0; i-- {
+		v := versions[i]
+		if strings.Contains(v, "beta") || strings.Contains(v, "pre") {
+			continue
+		}
+		mc, forge, ok := splitForgeCoord(v)
+		if !ok || mc != mcVersion {
+			continue
+		}
+		out = append(out, LoaderVersionInfo{ID: forge})
+		if len(out) >= 30 {
+			break
+		}
+	}
+	if len(out) > 0 {
+		out[0].Latest = true
+	}
+	return out, nil
+}
+
+func listNeoForgeLoaderVersions(ctx context.Context, mcVersion string) ([]LoaderVersionInfo, error) {
+	versions, err := fetchMavenVersions(ctx, neoMavenBase+"/maven-metadata.xml")
+	if err != nil {
+		return nil, err
+	}
+	out := []LoaderVersionInfo{}
+	for i := len(versions) - 1; i >= 0; i-- {
+		v := versions[i]
+		if strings.Contains(v, "beta") || strings.Contains(v, "alpha") {
+			continue
+		}
+		if neoForgeToMinecraft(v) != mcVersion {
+			continue
+		}
+		out = append(out, LoaderVersionInfo{ID: v})
+		if len(out) >= 30 {
+			break
+		}
+	}
+	if len(out) > 0 {
+		out[0].Latest = true
+	}
+	return out, nil
 }
 
 /* ---------- listing ---------- */

@@ -62,6 +62,9 @@ func (p *Proc) Start(bin string, args, extraEnv []string, readyMarker string) er
 		return fmt.Errorf("open console log: %w", err)
 	}
 
+	iso, unitID, memMB := p.isolation, p.unitID, p.memoryMB
+	bin, args = wrapIsolated(iso, unitID, memMB, p.dir, p.ctlDir, bin, args)
+
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = p.dir
 	if len(extraEnv) > 0 {
@@ -73,7 +76,10 @@ func (p *Proc) Start(bin string, args, extraEnv []string, readyMarker string) er
 	// The child inherits a write end of its own stdin FIFO (fd 3, unused by
 	// it). That keeps the FIFO from ever reporting EOF, so a restarted panel
 	// can reopen its writer and keep sending commands.
-	cmd.ExtraFiles = []*os.File{wr}
+	// Skip ExtraFiles for docker/systemd wrappers that may not forward fd 3.
+	if iso == "" || iso == "none" {
+		cmd.ExtraFiles = []*os.File{wr}
+	}
 	if err := cmd.Start(); err != nil {
 		rd.Close()
 		wr.Close()

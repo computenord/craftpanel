@@ -52,6 +52,11 @@ type User struct {
 	Hash       string    `json:"hash"`
 	TOTPSecret string    `json:"totpSecret,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
+	// Role is "admin" or "user". Empty means admin (back-compat for the
+	// first account created before roles existed).
+	Role string `json:"role,omitempty"`
+	// Access maps server id → permissions for non-admin users.
+	Access map[string]ServerAccess `json:"access,omitempty"`
 }
 
 type Session struct {
@@ -150,9 +155,14 @@ func (s *Store) FirstUsername() string {
 }
 
 func (s *Store) CreateUser(username, password string) error {
+	return s.CreateUserWithRole(username, password, RoleUser, nil)
+}
+
+// CreateUserWithRole creates a non-first user with an explicit role and access map.
+func (s *Store) CreateUserWithRole(username, password, role string, access map[string]ServerAccess) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createUserLocked(username, password, false)
+	return s.createUserLocked(username, password, false, role, access)
 }
 
 // CreateFirstUser creates the admin account, but only while no account exists.
@@ -161,15 +171,18 @@ func (s *Store) CreateUser(username, password string) error {
 func (s *Store) CreateFirstUser(username, password string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.createUserLocked(username, password, true)
+	return s.createUserLocked(username, password, true, RoleAdmin, nil)
 }
 
-func (s *Store) createUserLocked(username, password string, mustBeFirst bool) error {
+func (s *Store) createUserLocked(username, password string, mustBeFirst bool, role string, access map[string]ServerAccess) error {
 	if !usernameRe.MatchString(username) {
 		return errors.New("username must be 3-32 characters (letters, digits, _ . -)")
 	}
 	if len(password) < 8 {
 		return errors.New("password must be at least 8 characters")
+	}
+	if role != RoleAdmin && role != RoleUser {
+		role = RoleUser
 	}
 	s.reloadUsersLocked()
 	if mustBeFirst && len(s.users) > 0 {
@@ -180,17 +193,142 @@ func (s *Store) createUserLocked(username, password string, mustBeFirst bool) er
 			return ErrUserExists
 		}
 	}
-	s.users = append(s.users, User{
+	u := User{
 		Username:  username,
 		Hash:      hashPassword(password),
 		CreatedAt: time.Now().UTC(),
-	})
+		Role:      role,
+	}
+	if role != RoleAdmin && access != nil {
+		u.Access = access
+	}
+	s.users = append(s.users, u)
 	if err := fsutil.WriteJSONAtomic(s.usersPath, s.users); err != nil {
 		s.users = s.users[:len(s.users)-1]
 		return err
 	}
 	s.stampUsersLocked()
 	return nil
+}
+
+// ListUsers returns a copy of all users without password hashes.
+func (s *Store) ListUsers() []User {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reloadUsersLocked()
+	out := make([]User, len(s.users))
+	for i, u := range s.users {
+		out[i] = User{
+			Username:  u.Username,
+			CreatedAt: u.CreatedAt,
+			Role:      u.Role,
+			Access:    cloneAccess(u.Access),
+		}
+		if out[i].Role == "" {
+			out[i].Role = RoleAdmin
+		}
+	}
+	return out
+}
+
+// GetUser returns a user without the password hash.
+func (s *Store) GetUser(username string) (User, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reloadUsersLocked()
+	for _, u := range s.users {
+		if u.Username == username {
+			out := User{
+				Username:  u.Username,
+				CreatedAt: u.CreatedAt,
+				Role:      u.Role,
+				Access:    cloneAccess(u.Access),
+			}
+			if out.Role == "" {
+				out.Role = RoleAdmin
+			}
+			if u.TOTPSecret != "" {
+				out.TOTPSecret = "set"
+			}
+			return out, true
+		}
+	}
+	return User{}, false
+}
+
+// UpdateUserRoleAccess updates role and per-server access. Admins ignore access.
+func (s *Store) UpdateUserRoleAccess(username, role string, access map[string]ServerAccess) error {
+	if role != RoleAdmin && role != RoleUser {
+		return errors.New("role must be admin or user")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reloadUsersLocked()
+	for i := range s.users {
+		if s.users[i].Username != username {
+			continue
+		}
+		s.users[i].Role = role
+		if role == RoleAdmin {
+			s.users[i].Access = nil
+		} else {
+			s.users[i].Access = cloneAccess(access)
+		}
+		if err := fsutil.WriteJSONAtomic(s.usersPath, s.users); err != nil {
+			return err
+		}
+		s.stampUsersLocked()
+		return nil
+	}
+	return ErrUserNotFound
+}
+
+// DeleteUser removes a user and their sessions. Refuses to delete the last admin.
+func (s *Store) DeleteUser(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reloadUsersLocked()
+	idx := -1
+	admins := 0
+	for i, u := range s.users {
+		if u.IsAdmin() {
+			admins++
+		}
+		if u.Username == username {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		return ErrUserNotFound
+	}
+	if s.users[idx].IsAdmin() && admins <= 1 {
+		return errors.New("cannot delete the last admin")
+	}
+	for k, sess := range s.sessions {
+		if sess.Username == username {
+			delete(s.sessions, k)
+		}
+	}
+	s.users = append(s.users[:idx], s.users[idx+1:]...)
+	if err := fsutil.WriteJSONAtomic(s.sessPath, s.sessions); err != nil {
+		return err
+	}
+	if err := fsutil.WriteJSONAtomic(s.usersPath, s.users); err != nil {
+		return err
+	}
+	s.stampUsersLocked()
+	return nil
+}
+
+func cloneAccess(in map[string]ServerAccess) map[string]ServerAccess {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]ServerAccess, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (s *Store) SetPassword(username, password string) error {
@@ -271,6 +409,42 @@ func (s *Store) Authenticate(ip, username, password, code string) error {
 		s.lastTOTP[username] = step
 	}
 	delete(s.fails, ip)
+	return nil
+}
+
+// AuthenticatePasswordOnly verifies username/password without TOTP.
+// Used by SFTP (clients cannot supply a second factor).
+func (s *Store) AuthenticatePasswordOnly(ip, username, password string) error {
+	s.mu.Lock()
+	if !s.allowAttemptLocked(ip) {
+		s.mu.Unlock()
+		return ErrRateLimited
+	}
+	s.fails[ip] = append(s.fails[ip], time.Now())
+	s.reloadUsersLocked()
+	var hash string
+	found := false
+	for _, u := range s.users {
+		if u.Username == username {
+			hash = u.Hash
+			found = true
+			break
+		}
+	}
+	if !found {
+		hash = s.dummyHash
+	}
+	s.mu.Unlock()
+
+	hashSem <- struct{}{}
+	ok := verifyPassword(password, hash) && found
+	<-hashSem
+	if !ok {
+		return ErrInvalidCredentials
+	}
+	s.mu.Lock()
+	delete(s.fails, ip)
+	s.mu.Unlock()
 	return nil
 }
 

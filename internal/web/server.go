@@ -15,6 +15,8 @@ import (
 
 	"github.com/computenord/craftpanel/internal/auth"
 	"github.com/computenord/craftpanel/internal/mc"
+	"github.com/computenord/craftpanel/internal/node"
+	"github.com/computenord/craftpanel/internal/sftpd"
 )
 
 //go:embed static
@@ -30,6 +32,8 @@ type Handler struct {
 	Manager  *mc.Manager
 	Versions *mc.Versions
 	Version  string
+	Nodes    *node.Registry
+	SFTP     *sftpd.Server
 
 	// TrustProxy makes the login rate limiter read the client address from
 	// X-Forwarded-For. Only enable it when a reverse proxy sets that header,
@@ -60,8 +64,8 @@ type javaInfo struct {
 	Major   int    `json:"major,omitempty"`
 }
 
-func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool, restart func(), lockState func() string, ssoKey func() string) http.Handler {
-	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy, Restart: restart, LockState: lockState, SSOKey: ssoKey}
+func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, version string, trustProxy bool, restart func(), lockState func() string, ssoKey func() string, nodes *node.Registry, sftpSrv *sftpd.Server) http.Handler {
+	h := &Handler{Auth: authStore, Manager: manager, Versions: versions, Version: version, TrustProxy: trustProxy, Restart: restart, LockState: lockState, SSOKey: ssoKey, Nodes: nodes, SFTP: sftpSrv}
 
 	mux := http.NewServeMux()
 
@@ -89,12 +93,17 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("GET /api/me", h.me)
 	mux.HandleFunc("GET /api/system", h.system)
 	mux.HandleFunc("GET /api/versions", h.versionList)
+	mux.HandleFunc("GET /api/loaders", h.loaderVersions)
 
 	mux.HandleFunc("GET /api/servers", h.listServers)
 	mux.HandleFunc("POST /api/servers", h.createServer)
+	mux.HandleFunc("POST /api/servers/from-backup", h.createFromBackup)
+	mux.HandleFunc("POST /api/servers/import", h.importServer)
+	mux.HandleFunc("POST /api/servers/from-template", h.createFromTemplate)
 	mux.HandleFunc("GET /api/servers/{id}", h.getServer)
 	mux.HandleFunc("PATCH /api/servers/{id}", h.updateServer)
 	mux.HandleFunc("DELETE /api/servers/{id}", h.deleteServer)
+	mux.HandleFunc("POST /api/servers/{id}/clone", h.cloneServer)
 	mux.HandleFunc("POST /api/servers/{id}/start", h.startServer)
 	mux.HandleFunc("POST /api/servers/{id}/stop", h.stopServer)
 	mux.HandleFunc("POST /api/servers/{id}/restart", h.restartServer)
@@ -131,12 +140,25 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("POST /api/servers/{id}/plugins/upload", h.pluginUpload)
 	mux.HandleFunc("GET /api/servers/{id}/mods", h.modsList)
 	mux.HandleFunc("GET /api/servers/{id}/mods/search", h.modsSearch)
+	mux.HandleFunc("GET /api/servers/{id}/mods/preview", h.modPreview)
+	mux.HandleFunc("GET /api/servers/{id}/mods/updates", h.modsUpdatePreview)
+	mux.HandleFunc("POST /api/servers/{id}/mods/update-all", h.modsUpdateAll)
 	mux.HandleFunc("POST /api/servers/{id}/mods/install", h.modInstall)
+	mux.HandleFunc("POST /api/servers/{id}/mods/enable", h.modEnable)
 	mux.HandleFunc("DELETE /api/servers/{id}/mods", h.modDelete)
 	mux.HandleFunc("POST /api/servers/{id}/mods/upload", h.modUpload)
 	mux.HandleFunc("GET /api/modpacks/search", h.modpacksSearch)
+	mux.HandleFunc("GET /api/modpacks/analyze", h.modpackAnalyze)
 	mux.HandleFunc("GET /api/modpacks/{project}/versions", h.modpackVersions)
 	mux.HandleFunc("POST /api/servers/{id}/modpack/upgrade", h.modpackUpgrade)
+	mux.HandleFunc("GET /api/servers/{id}/client-pack", h.clientPackInfo)
+	mux.HandleFunc("GET /api/servers/{id}/preflight", h.preflight)
+	mux.HandleFunc("GET /api/servers/{id}/datapacks", h.datapacksList)
+	mux.HandleFunc("GET /api/servers/{id}/datapacks/search", h.datapacksSearch)
+	mux.HandleFunc("POST /api/servers/{id}/datapacks/install", h.datapackInstall)
+	mux.HandleFunc("POST /api/servers/{id}/datapacks/enable", h.datapackEnable)
+	mux.HandleFunc("DELETE /api/servers/{id}/datapacks", h.datapackDelete)
+	mux.HandleFunc("POST /api/servers/{id}/datapacks/upload", h.datapackUpload)
 	mux.HandleFunc("GET /api/servers/{id}/players", h.playersList)
 	mux.HandleFunc("POST /api/servers/{id}/players/action", h.playerAction)
 	mux.HandleFunc("GET /api/servers/{id}/access", h.accessInfo)
@@ -151,6 +173,37 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("POST /api/servers/{id}/files/upload", h.fileUpload)
 	mux.HandleFunc("POST /api/servers/{id}/files/mkdir", h.fileMkdir)
 	mux.HandleFunc("POST /api/servers/{id}/files/rename", h.fileRename)
+
+	mux.HandleFunc("GET /api/users", h.listUsers)
+	mux.HandleFunc("POST /api/users", h.createUser)
+	mux.HandleFunc("PATCH /api/users/{username}", h.updateUser)
+	mux.HandleFunc("DELETE /api/users/{username}", h.deleteUser)
+	mux.HandleFunc("GET /api/tokens", h.listTokens)
+	mux.HandleFunc("POST /api/tokens", h.createToken)
+	mux.HandleFunc("DELETE /api/tokens/{id}", h.deleteToken)
+	mux.HandleFunc("GET /api/audit", h.listAudit)
+	mux.HandleFunc("GET /api/java", h.listJava)
+	mux.HandleFunc("POST /api/java", h.installJava)
+	mux.HandleFunc("GET /api/templates", h.listTemplates)
+	mux.HandleFunc("PUT /api/templates", h.saveTemplate)
+	mux.HandleFunc("DELETE /api/templates/{id}", h.deleteTemplate)
+	mux.HandleFunc("GET /api/servers/{id}/metrics", h.serverMetrics)
+	mux.HandleFunc("GET /api/servers/{id}/geyser", h.geyserStatus)
+	mux.HandleFunc("POST /api/servers/{id}/geyser", h.geyserInstall)
+	mux.HandleFunc("POST /api/servers/{id}/world/import", h.importWorld)
+	mux.HandleFunc("GET /api/servers/{id}/resource-pack", h.resourcePackGet)
+	mux.HandleFunc("POST /api/servers/{id}/resource-pack", h.resourcePackUpload)
+	mux.HandleFunc("DELETE /api/servers/{id}/resource-pack", h.resourcePackDelete)
+	mux.HandleFunc("GET /api/servers/{id}/resource-pack/download", h.resourcePackDownload)
+	mux.HandleFunc("GET /api/servers/{id}/world/download", h.exportWorld)
+
+	mux.HandleFunc("GET /api/nodes", h.listNodes)
+	mux.HandleFunc("POST /api/nodes", h.enrollNode)
+	mux.HandleFunc("DELETE /api/nodes/{id}", h.deleteNode)
+	mux.HandleFunc("POST /api/nodes/{id}/command", h.nodeCommand)
+	mux.HandleFunc("POST /api/nodes/sync", h.nodeSync)
+	mux.HandleFunc("GET /api/nodes/bootstrap", h.nodeBootstrap)
+	mux.HandleFunc("GET /api/nodes/binary", h.nodeBinary)
 
 	return h.securityHeaders(h.csrfGuard(h.authGate(h.lockGuard(mux))))
 }
@@ -200,6 +253,11 @@ func (h *Handler) csrfGuard(next http.Handler) http.Handler {
 			switch r.Method {
 			case http.MethodGet, http.MethodHead, http.MethodOptions:
 			default:
+				// Bearer API tokens are not cookie sessions; skip CSRF.
+				if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+					next.ServeHTTP(w, r)
+					return
+				}
 				if r.Header.Get(csrfHeader) == "" {
 					apiError(w, http.StatusForbidden, "csrf", "missing "+csrfHeader+" header")
 					return
@@ -213,23 +271,64 @@ func (h *Handler) csrfGuard(next http.Handler) http.Handler {
 // authGate protects every /api route except login and first-run setup.
 func (h *Handler) authGate(next http.Handler) http.Handler {
 	open := map[string]bool{
-		"POST /api/login":       true,
-		"GET /api/setup-status": true,
-		"POST /api/setup":       true,
+		"POST /api/login":         true,
+		"GET /api/setup-status":   true,
+		"POST /api/setup":         true,
+		"POST /api/nodes/sync":    true, // remote agents authenticate with node tokens
+		"GET /api/nodes/bootstrap": true,
+		"GET /api/nodes/binary":   true,
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.URL.Path, "/api/") || open[r.Method+" "+r.URL.Path] {
 			next.ServeHTTP(w, r)
 			return
 		}
-		cookie, err := r.Cookie(auth.SessionCookie)
-		if err != nil {
-			apiError(w, http.StatusUnauthorized, "unauthorized", "not signed in")
-			return
+		var user auth.User
+		var ok bool
+		if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+			raw := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
+			if strings.HasPrefix(raw, "node_") {
+				apiError(w, http.StatusUnauthorized, "unauthorized", "node tokens only work on /api/nodes/sync")
+				return
+			}
+			user, ok = h.Auth.ValidateAPIToken(raw)
+			if !ok {
+				apiError(w, http.StatusUnauthorized, "unauthorized", "invalid API token")
+				return
+			}
+		} else {
+			cookie, err := r.Cookie(auth.SessionCookie)
+			if err != nil {
+				apiError(w, http.StatusUnauthorized, "unauthorized", "not signed in")
+				return
+			}
+			username, sessOK := h.Auth.ValidateSession(cookie.Value)
+			if !sessOK {
+				apiError(w, http.StatusUnauthorized, "unauthorized", "session expired")
+				return
+			}
+			user, ok = h.Auth.GetUser(username)
+			if !ok {
+				apiError(w, http.StatusUnauthorized, "unauthorized", "user not found")
+				return
+			}
 		}
-		if _, ok := h.Auth.ValidateSession(cookie.Value); !ok {
-			apiError(w, http.StatusUnauthorized, "unauthorized", "session expired")
-			return
+		r = r.WithContext(auth.WithUser(r.Context(), user))
+
+		// Per-server permission gate for /api/servers/{id}/...
+		if strings.HasPrefix(r.URL.Path, "/api/servers/") {
+			rest := strings.TrimPrefix(r.URL.Path, "/api/servers/")
+			id := strings.SplitN(rest, "/", 2)[0]
+			if id != "" && id != "from-backup" && id != "import" && id != "from-template" {
+				perm := serverPermForRoute(r.Method, r.URL.Path)
+				if perm != "" {
+					access, allowed := user.AccessFor(id)
+					if !allowed || !access.Allows(perm) {
+						apiError(w, http.StatusForbidden, "forbidden", "missing permission: "+perm)
+						return
+					}
+				}
+			}
 		}
 		next.ServeHTTP(w, r)
 	})

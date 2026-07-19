@@ -82,6 +82,7 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.setSessionCookie(w, r, token, 7*24*3600)
+	h.Manager.Audit(req.Username, "login", "", "", h.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]string{"username": req.Username})
 }
 
@@ -94,15 +95,17 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(auth.SessionCookie)
-	if err != nil {
+	u, ok := h.currentUser(r)
+	if !ok {
 		apiError(w, http.StatusUnauthorized, "unauthorized", "not signed in")
 		return
 	}
-	username, _ := h.Auth.ValidateSession(cookie.Value)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"username": username,
-		"totp":     h.Auth.TOTPEnabled(username),
+		"username": u.Username,
+		"role":     u.Role,
+		"access":   u.Access,
+		"admin":    u.IsAdmin(),
+		"totp":     h.Auth.TOTPEnabled(u.Username),
 	})
 }
 
@@ -148,10 +151,38 @@ func (h *Handler) versionList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listServers(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, h.Manager.List())
+	all := h.Manager.List()
+	u, ok := h.currentUser(r)
+	var local []mc.ServerView
+	if !ok || u.IsAdmin() {
+		local = all
+	} else {
+		local = make([]mc.ServerView, 0, len(all))
+		for _, s := range all {
+			if _, allowed := u.AccessFor(s.ID); allowed {
+				local = append(local, s)
+			}
+		}
+	}
+	// Admins also see remote node servers (composite ids).
+	if ok && u.IsAdmin() && h.Nodes != nil {
+		out := make([]any, 0, len(local)+8)
+		for _, s := range local {
+			out = append(out, s)
+		}
+		for _, rem := range h.Nodes.AllServers() {
+			out = append(out, rem)
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	writeJSON(w, http.StatusOK, local)
 }
 
 func (h *Handler) createServer(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.requireAdmin(w, r); !ok {
+		return
+	}
 	var req mc.CreateRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -162,6 +193,7 @@ func (h *Handler) createServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("created server %s (%s %s)", view.ID, view.Type, view.Version)
+	h.audit(r, "server.create", view.ID, view.Type+" "+view.Version)
 	writeJSON(w, http.StatusCreated, view)
 }
 

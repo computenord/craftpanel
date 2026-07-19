@@ -1,11 +1,15 @@
 package mc
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/computenord/craftpanel/internal/fsutil"
 )
 
 // runScheduler drives all time based per-server jobs: daily backups,
@@ -55,8 +59,64 @@ func (m *Manager) runScheduler() {
 			if restartDue {
 				go m.warnedRestart(srv)
 			}
+			m.runDueScheduledCommands(srv, hhmm, day)
 		}
 	}
+}
+
+func normalizeScheduledCommands(in []ScheduledCommand) ([]ScheduledCommand, error) {
+	if len(in) > 50 {
+		return nil, errors.New("at most 50 scheduled commands")
+	}
+	out := make([]ScheduledCommand, 0, len(in))
+	for i, c := range in {
+		c.Command = strings.TrimSpace(c.Command)
+		c.Time = strings.TrimSpace(c.Time)
+		if c.Command == "" {
+			continue
+		}
+		if len(c.Command) > 200 {
+			return nil, errors.New("command too long")
+		}
+		if c.Time != "" && !backupTimeRe.MatchString(c.Time) {
+			return nil, errors.New("scheduled command time must be HH:MM")
+		}
+		if c.ID == "" {
+			c.ID = fmt.Sprintf("cmd-%d", i+1)
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+func (m *Manager) runDueScheduledCommands(srv *Server, hhmm, day string) {
+	srv.mu.Lock()
+	if srv.deleting || srv.proc.State() != StateRunning {
+		srv.mu.Unlock()
+		return
+	}
+	changed := false
+	for i := range srv.meta.ScheduledCommands {
+		c := &srv.meta.ScheduledCommands[i]
+		if !c.Enabled || c.Time != hhmm || c.LastRun == day || c.Command == "" {
+			continue
+		}
+		cmd := c.Command
+		c.LastRun = day
+		changed = true
+		id := srv.meta.ID
+		srv.mu.Unlock()
+		if err := srv.proc.SendCommand(cmd); err != nil {
+			log.Printf("scheduled command %s: %v", id, err)
+		} else {
+			srv.proc.Note("Scheduled: " + cmd)
+		}
+		srv.mu.Lock()
+	}
+	if changed {
+		_ = fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta)
+	}
+	srv.mu.Unlock()
 }
 
 // warnStartHHMM shifts the configured restart time back by the warning lead,

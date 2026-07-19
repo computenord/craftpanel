@@ -71,10 +71,31 @@ type Instance struct {
 	RestartTime string `json:"restartTime,omitempty"` // "04:00", time of the restart itself
 	RestartWarn int    `json:"restartWarn,omitempty"` // warning lead in minutes
 
+	// ScheduledCommands runs console commands at a daily HH:MM when the server is up.
+	ScheduledCommands []ScheduledCommand `json:"scheduledCommands,omitempty"`
+
 	// NetworkServers lists backend server ids wired to this Velocity proxy.
 	NetworkServers []string `json:"networkServers,omitempty"`
 
+	// ProxyProtocol enables HAProxy PROXY protocol on Velocity (and linked Paper backends).
+	ProxyProtocol bool `json:"proxyProtocol,omitempty"`
+
+	// Isolation is ""/"none", "systemd", or "docker" (Linux). Controls process sandboxing.
+	Isolation string `json:"isolation,omitempty"`
+
+	// NodeID is empty for local servers; set when the instance lives on a remote node.
+	NodeID string `json:"nodeId,omitempty"`
+
 	Discord DiscordConfig `json:"discord"`
+}
+
+// ScheduledCommand is a daily console command.
+type ScheduledCommand struct {
+	ID      string `json:"id"`
+	Time    string `json:"time"` // HH:MM
+	Command string `json:"command"`
+	Enabled bool   `json:"enabled"`
+	LastRun string `json:"lastRun,omitempty"` // YYYYMMDD
 }
 
 // ServerView is what the API returns: config plus runtime state.
@@ -194,6 +215,7 @@ func NewManager(dataDir string, versions *Versions) (*Manager, error) {
 		m.items[meta.ID] = srv
 	}
 	go m.runScheduler()
+	go m.runMetricsSampler()
 	return m, nil
 }
 
@@ -427,16 +449,28 @@ func (m *Manager) View(id string) (ServerView, error) {
 	return v, nil
 }
 
+// GetServerDataDir returns the jail root for file access (SFTP / tools).
+func (m *Manager) GetServerDataDir(id string) (string, error) {
+	srv, err := m.get(id)
+	if err != nil {
+		return "", err
+	}
+	return srv.DataDir(), nil
+}
+
 type CreateRequest struct {
 	Name     string `json:"name"`
 	Type     string `json:"type"`
 	Version  string `json:"version"`
 	MemoryMB int    `json:"memoryMB"`
 	Port     int    `json:"port"`
-	// ModpackProject / ModpackVersion select a Modrinth modpack when Type is
-	// "modpack". Version may be empty in that case.
+	// LoaderVersion pins Fabric/Forge/NeoForge/Quilt when creating a loader
+	// server. Empty picks the newest stable build.
+	LoaderVersion string `json:"loaderVersion,omitempty"`
+	// ModpackProject / ModpackVersion select a modpack when Type is "modpack".
 	ModpackProject string `json:"modpackProject,omitempty"`
 	ModpackVersion string `json:"modpackVersion,omitempty"`
+	ModpackSource  string `json:"modpackSource,omitempty"` // modrinth | curseforge
 }
 
 func (m *Manager) Create(req CreateRequest) (ServerView, error) {
@@ -445,7 +479,7 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 		return ServerView{}, fmt.Errorf("name must be 1-%d characters", nameMaxLength)
 	}
 	if !validServerType(req.Type) {
-		return ServerView{}, errors.New("type must be vanilla, paper, fabric, forge, neoforge, quilt, modpack, bedrock or velocity")
+		return ServerView{}, errors.New("type must be vanilla, paper, purpur, folia, fabric, forge, neoforge, quilt, modpack, bedrock, velocity or waterfall")
 	}
 
 	var pack *resolvedModpack
@@ -453,8 +487,8 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 		if strings.TrimSpace(req.ModpackProject) == "" {
 			return ServerView{}, errors.New("modpackProject is required for modpack servers")
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		resolved, err := resolveModpack(ctx, req.ModpackProject, req.ModpackVersion)
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		resolved, err := m.resolveModpack(ctx, req.ModpackSource, req.ModpackProject, req.ModpackVersion)
 		cancel()
 		if err != nil {
 			return ServerView{}, err
@@ -503,17 +537,22 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 	}
 
 	meta := Instance{
-		ID:        id,
-		Name:      name,
-		Type:      req.Type,
-		Version:   req.Version,
-		Port:      req.Port,
-		MemoryMB:  req.MemoryMB,
-		CreatedAt: time.Now().UTC(),
+		ID:            id,
+		Name:          name,
+		Type:          req.Type,
+		Version:       req.Version,
+		LoaderVersion: strings.TrimSpace(req.LoaderVersion),
+		Port:          req.Port,
+		MemoryMB:      req.MemoryMB,
+		CreatedAt:     time.Now().UTC(),
 	}
 	if pack != nil {
 		ref := pack.Ref
+		if ref.Source == "" {
+			ref.Source = SourceModrinth
+		}
 		meta.Modpack = &ref
+		meta.LoaderVersion = "" // taken from pack index during install
 	}
 
 	// Bedrock has no eula.txt mechanism, the panel still keeps one as its own
@@ -527,6 +566,12 @@ func (m *Manager) Create(req CreateRequest) (ServerView, error) {
 		// Proxies have no server.properties; they get a velocity.toml plus a
 		// forwarding secret for the backend handshake instead.
 		if err := writeVelocityConfig(dataDir, name, req.Port); err != nil {
+			os.RemoveAll(dir)
+			return ServerView{}, err
+		}
+	} else if req.Type == TypeWaterfall {
+		cfg := fmt.Sprintf("listeners:\n- query_port: %d\n  host: 0.0.0.0:%d\n  motd: '%s'\n", req.Port, req.Port, sanitizeMOTD(name))
+		if err := fsutil.WriteFileAtomic(filepath.Join(dataDir, "config.yml"), []byte(cfg), 0o644); err != nil {
 			os.RemoveAll(dir)
 			return ServerView{}, err
 		}
@@ -705,11 +750,16 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 		}
 	case modpack != nil && modpack.ProjectID != "":
 		var pack resolvedModpack
-		pack, err = resolveModpack(ctx, modpack.ProjectID, modpack.VersionID)
+		pack, err = m.resolveModpack(ctx, modpack.Source, modpack.ProjectID, modpack.VersionID)
 		if err == nil {
-			version, loaderVersion, err = m.installModpack(ctx, srv, pack, javaPath, progress)
+			var loaderType string
+			version, loaderType, loaderVersion, err = m.installModpack(ctx, srv, pack, javaPath, progress)
 			if err == nil {
-				typ = pack.LoaderType
+				if loaderType != "" {
+					typ = loaderType
+				} else {
+					typ = pack.LoaderType
+				}
 				ref := pack.Ref
 				srv.mu.Lock()
 				srv.meta.Type = typ
@@ -731,8 +781,8 @@ func (m *Manager) runInstall(srv *Server, targetVersion string) {
 	// Record the Java requirement while we are online anyway, so a later
 	// start can fail fast instead of dying with a JVM exit status.
 	if err == nil && typ != TypeBedrock {
-		if typ == TypeVelocity {
-			javaMajor = 17 // Velocity 3.x baseline
+		if typ == TypeVelocity || typ == TypeWaterfall {
+			javaMajor = 17 // proxy baseline
 		} else if major, jerr := m.versions.JavaMajor(ctx, version); jerr == nil {
 			javaMajor = major
 		} else {
@@ -822,10 +872,13 @@ type UpdateRequest struct {
 	BackupAuto     *bool          `json:"backupAuto"`
 	BackupTime     *string        `json:"backupTime"`
 	BackupKeep     *int           `json:"backupKeep"`
-	RestartAuto    *bool          `json:"restartAuto"`
-	RestartTime    *string        `json:"restartTime"`
-	RestartWarn    *int           `json:"restartWarn"`
-	Discord        *DiscordConfig `json:"discord"`
+	RestartAuto       *bool              `json:"restartAuto"`
+	RestartTime       *string            `json:"restartTime"`
+	RestartWarn       *int               `json:"restartWarn"`
+	Discord           *DiscordConfig      `json:"discord"`
+	ScheduledCommands *[]ScheduledCommand `json:"scheduledCommands"`
+	ProxyProtocol     *bool               `json:"proxyProtocol"`
+	Isolation         *string             `json:"isolation"`
 }
 
 var backupTimeRe = regexp.MustCompile(`^([01][0-9]|2[0-3]):[0-5][0-9]$`)
@@ -899,19 +952,58 @@ func (m *Manager) Update(id string, req UpdateRequest) (ServerView, error) {
 	if req.Discord != nil {
 		d := *req.Discord
 		d.Webhook = strings.TrimSpace(d.Webhook)
-		if d.Webhook != "" && !validDiscordWebhook(d.Webhook) {
+		if d.Webhook != "" && !validWebhookURL(d.Webhook) {
 			srv.mu.Unlock()
-			return ServerView{}, errors.New("the webhook must be a discord.com webhook URL")
+			return ServerView{}, errors.New("webhook must be an https URL (Discord or generic)")
 		}
 		if d.Lang != "de" {
 			d.Lang = "en"
 		}
 		srv.meta.Discord = d
 	}
+	if req.ScheduledCommands != nil {
+		cmds, err := normalizeScheduledCommands(*req.ScheduledCommands)
+		if err != nil {
+			srv.mu.Unlock()
+			return ServerView{}, err
+		}
+		srv.meta.ScheduledCommands = cmds
+	}
+	if req.ProxyProtocol != nil {
+		if srv.meta.Type != TypeVelocity {
+			srv.mu.Unlock()
+			return ServerView{}, errors.New("proxy protocol is only available on Velocity")
+		}
+		srv.meta.ProxyProtocol = *req.ProxyProtocol
+	}
+	if req.Isolation != nil {
+		iso := strings.TrimSpace(strings.ToLower(*req.Isolation))
+		switch iso {
+		case "", "none", "systemd", "docker":
+			if iso == "none" {
+				iso = ""
+			}
+			srv.meta.Isolation = iso
+		default:
+			srv.mu.Unlock()
+			return ServerView{}, errors.New("isolation must be none, systemd, or docker")
+		}
+	}
+	proxyProtocolChanged := req.ProxyProtocol != nil
+	proxyOn := srv.meta.ProxyProtocol
+	backends := append([]string{}, srv.meta.NetworkServers...)
 	err = fsutil.WriteJSONAtomic(filepath.Join(srv.dir, metaFile), srv.meta)
 	srv.mu.Unlock()
 	if err != nil {
 		return ServerView{}, err
+	}
+	if proxyProtocolChanged {
+		_ = applyVelocityProxyProtocol(srv.DataDir(), proxyOn)
+		for _, bid := range backends {
+			if b, gerr := m.get(bid); gerr == nil {
+				_ = patchPaperProxyProtocol(b.DataDir(), proxyOn)
+			}
+		}
 	}
 	v := srv.view()
 	decorateDomain(&v, m.domainSnapshot())
@@ -919,6 +1011,32 @@ func (m *Manager) Update(id string, req UpdateRequest) (ServerView, error) {
 }
 
 func (m *Manager) Start(id string) error {
+	pf, err := m.Preflight(id)
+	if err != nil {
+		return err
+	}
+	if !pf.OK {
+		for _, c := range pf.Checks {
+			if !c.OK && c.Level == "error" {
+				if c.Code == "java_version" {
+					// Preserve structured error for the API when possible.
+					srv, gerr := m.get(id)
+					if gerr == nil {
+						srv.mu.Lock()
+						need := srv.meta.JavaMajor
+						javaPath := srv.meta.JavaPath
+						srv.mu.Unlock()
+						have, _ := DetectJava(javaPath)
+						if need > 0 && have > 0 {
+							return &JavaTooOldError{Need: need, Have: have}
+						}
+					}
+				}
+				return errors.New(c.Message)
+			}
+		}
+		return errors.New("server is not ready to start")
+	}
 	srv, err := m.get(id)
 	if err != nil {
 		return err
@@ -950,6 +1068,8 @@ func (s *Server) start() error {
 	if !s.eulaAccepted() {
 		return errors.New("eula not accepted")
 	}
+
+	s.proc.SetIsolation(s.meta.Isolation, s.meta.ID, s.meta.MemoryMB)
 
 	if s.meta.Type == TypeBedrock {
 		bin := filepath.Join(s.DataDir(), BedrockBinaryName())
@@ -989,6 +1109,9 @@ func (s *Server) start() error {
 		// Velocity neither knows "nogui" nor "stop".
 		args = append(args, "-jar", jarName)
 		stopCmd = "shutdown"
+	case s.meta.Type == TypeWaterfall:
+		args = append(args, "-jar", jarName)
+		stopCmd = "end"
 	case IsModded(s.meta.Type):
 		launch, err := loaderLaunchArgs(s.DataDir(), s.meta.Type, s.meta.Version, s.meta.LoaderVersion)
 		if err != nil {

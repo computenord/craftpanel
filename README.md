@@ -52,7 +52,7 @@ docs/screenshots/HOWTO.md for the exact shots and how to take them.
 
 **Plugins without the hunt.** On Paper servers the panel searches Modrinth directly: one click downloads a compatible plugin version (checksum verified, matched to your Minecraft version), shows installed plugins with available updates, and removes them again. Your own jars upload straight into `plugins/`.
 
-**Modded Minecraft and modpacks.** Create Fabric, Forge, NeoForge or Quilt servers (latest stable loader for the chosen Minecraft version). The Mods tab searches Modrinth the same way as plugins. Or create a server from a Modrinth modpack: the panel installs the required loader, downloads every server-side mod (checksum verified) and applies pack overrides.
+**Modded Minecraft and modpacks.** Create Fabric, Forge, NeoForge or Quilt servers (optional pinned loader version). The Mods tab searches Modrinth, supports disable/enable, dependency checks and bulk updates. Datapacks install into the world folder. Modpacks come from Modrinth or CurseForge (API key in panel settings): the panel rates server suitability, suggests RAM/Java, installs the loader, downloads mods and applies overrides. Backups include a `craftpanel-pack.json` manifest; modpack servers expose copyable client-pack info. Start runs a preflight check first.
 
 **Keeps servers alive.** Optional automatic restart after a crash, with exponential backoff so a broken server does not flap. Scheduled daily restarts warn players in chat before they happen. Version upgrades keep the world: pick a new Minecraft version and the panel swaps the jar, only committing after a verified download.
 
