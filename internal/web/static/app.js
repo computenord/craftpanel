@@ -6,6 +6,7 @@ const $app = document.getElementById("app");
 let me = null;
 let meAdmin = false;
 let meTotp = false;
+let meRecoveryLeft = 0;
 let sys = null;
 let pollTimer = null;
 let tabTimer = null;
@@ -209,6 +210,7 @@ async function boot() {
     me = info.username;
     meAdmin = !!info.admin;
     meTotp = !!info.totp;
+    meRecoveryLeft = info.recoveryRemaining || 0;
   } catch {
     return renderLogin();
   }
@@ -238,7 +240,7 @@ function renderLogin() {
     <div id="login-err"></div>
     <label class="field"><span>${t("login.username")}</span><input type="text" name="username" autocomplete="username" required></label>
     <label class="field"><span>${t("login.password")}</span><input type="password" name="password" autocomplete="current-password" required></label>
-    <label class="field" id="totp-row" hidden><span>${t("totp.loginCode")}</span><input type="text" name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></label>
+    <label class="field" id="totp-row" hidden><span>${t("totp.loginCode")}</span><input type="text" name="code" inputmode="text" maxlength="12" autocomplete="one-time-code" placeholder="${esc(t("totp.loginPlaceholder"))}"></label>
     <button class="btn btn-primary" type="submit">${t("login.submit")}</button>
   </form>`);
   wrap.querySelector("#login-form").addEventListener("submit", async (e) => {
@@ -255,6 +257,7 @@ function renderLogin() {
       if (info) {
         meTotp = !!info.totp;
         meAdmin = !!info.admin;
+        meRecoveryLeft = info.recoveryRemaining || 0;
       }
       sys = await api("/api/system").catch(() => null);
       renderShellAndRoute();
@@ -789,7 +792,7 @@ function renderDashList(grid, servers) {
       : `${host}:${s.port}`;
     const ramPct = s.memoryMB ? Math.min(100, Math.round((s.rssMB / s.memoryMB) * 100)) : 0;
     const tr = el(`<tr>
-      <td><b>${esc(s.name)}</b></td>
+      <td><b>${esc(s.name)}</b>${s.nodeName ? ` <span class="hint">· ${esc(s.nodeName)}</span>` : ""}</td>
       <td>${statusBadge(s)}</td>
       <td class="mono">${esc(addr)}</td>
       <td class="mono">${s.status === "running" && s.players ? `${s.players.online}/${s.players.max}` : "—"}</td>
@@ -926,7 +929,8 @@ function updateServerCard(card, s) {
     ? `${esc(s.modpack.title)} · ${esc(s.type)} ${esc(s.version)}`
     : `${esc(s.type)} ${esc(s.version)}`;
   const meta = card.querySelector(".sc-meta");
-  const metaHTML = `<span>${esc(addr)}</span><span>·</span><span>${typeLabel}</span>`;
+  const nodeBit = s.nodeName ? `<span>·</span><span title="${esc(s.nodeId || "")}">${esc(s.nodeName)}${s.apiReady === false ? " ⚠" : ""}</span>` : "";
+  const metaHTML = `<span>${esc(addr)}</span><span>·</span><span>${typeLabel}</span>${nodeBit}`;
   if (meta.innerHTML !== metaHTML) meta.innerHTML = metaHTML;
 
   const running = s.status === "running";
@@ -1075,8 +1079,13 @@ async function renderCreateWizard() {
     templates: null, templateId: "",
     cloneId: "",
     importFile: null, importType: "paper", importVersion: "",
-    name: "", memoryMB: 2048, port: ""
+    name: "", memoryMB: 2048, port: "",
+    nodeId: "", nodeName: "", nodes: []
   };
+  try {
+    const nodes = await api("/api/nodes");
+    st.nodes = (nodes || []).filter((n) => n.apiReady);
+  } catch { st.nodes = []; }
 
   const c = content();
   c.innerHTML = `
@@ -1413,9 +1422,17 @@ async function renderCreateWizard() {
     const bedrock = st.source === "empty" && st.type === "bedrock";
     const minMem = st.source === "modpack" ? 4096 : isModdedType(st.type) ? 2048 : 1024;
     if (st.memoryMB < minMem) st.memoryMB = minMem;
+    const nodeOpts = [`<option value="">${esc(t("create.nodeLocal"))}</option>`]
+      .concat(st.nodes.map((n) =>
+        `<option value="${esc(n.id)}" ${st.nodeId === n.id ? "selected" : ""}>${esc(n.name)}</option>`));
+    // Clone/import/template stay on the panel host; empty+modpack can target a node.
+    const canPickNode = (st.source === "empty" || st.source === "modpack") && st.nodes.length > 0;
     body.innerHTML = `<div class="page-narrow">
       <label class="field"><span>${t("create.name")}</span>
         <input type="text" id="wz-name" maxlength="40"></label>
+      ${canPickNode ? `<label class="field"><span>${t("create.node")}</span>
+        <select id="wz-node">${nodeOpts.join("")}</select></label>
+        <p class="hint">${t("create.nodeHint")}</p>` : ""}
       ${needsResources() ? `<div class="form-row">
         ${bedrock ? "" : `<label class="field"><span>${t("create.memory")}</span>
           <select id="wz-mem">${MEM_OPTIONS.map((m) =>
@@ -1431,6 +1448,14 @@ async function renderCreateWizard() {
     name.value = st.name;
     name.addEventListener("input", () => { st.name = name.value; syncFoot(); });
     name.focus();
+    const nodeSel = body.querySelector("#wz-node");
+    if (nodeSel) {
+      nodeSel.addEventListener("change", () => {
+        st.nodeId = nodeSel.value;
+        const n = st.nodes.find((x) => x.id === st.nodeId);
+        st.nodeName = n ? n.name : "";
+      });
+    }
     const mem = body.querySelector("#wz-mem");
     if (mem) mem.addEventListener("change", () => { st.memoryMB = parseInt(mem.value, 10); });
     const port = body.querySelector("#wz-port");
@@ -1457,6 +1482,7 @@ async function renderCreateWizard() {
       rows.push([t("wiz.src.import"), `${st.importFile ? esc(st.importFile.name) : ""} · ${st.importType} ${st.importVersion}`]);
     }
     rows.push([t("create.name"), st.name.trim()]);
+    if (st.nodeId) rows.push([t("create.node"), st.nodeName || st.nodeId]);
     if (needsResources()) {
       if (!(st.source === "empty" && st.type === "bedrock")) {
         rows.push([t("create.memory"), (st.memoryMB / 1024) + " GB"]);
@@ -1479,6 +1505,7 @@ async function renderCreateWizard() {
         const req = { name: st.name.trim(), type: st.type, version: st.version, memoryMB: st.memoryMB };
         if (st.port) req.port = parseInt(st.port, 10);
         if (isModdedType(st.type) && st.loaderVersion) req.loaderVersion = st.loaderVersion;
+        if (st.nodeId) req.nodeId = st.nodeId;
         view = await api("/api/servers", { method: "POST", body: req });
       } else if (st.source === "modpack") {
         const req = {
@@ -1486,6 +1513,7 @@ async function renderCreateWizard() {
           modpackProject: st.mpProject, modpackVersion: st.mpVersion, modpackSource: st.mpHitSource
         };
         if (st.port) req.port = parseInt(st.port, 10);
+        if (st.nodeId) req.nodeId = st.nodeId;
         view = await api("/api/servers", { method: "POST", body: req });
       } else if (st.source === "template") {
         view = await api("/api/servers/from-template", {
@@ -3851,7 +3879,8 @@ async function panelNodesPage(box) {
       host.innerHTML = list.length
         ? `<ul class="plist">${list.map((n) =>
           `<li><span><b>${esc(n.name)}</b> <span class="badge ${n.online ? "st-running" : "st-install_failed"}"><i class="led"></i>${n.online ? "online" : "offline"}</span>
-            <span class="plg-desc">${n.serverCount || 0} servers</span></span>
+            <span class="plg-desc">${n.serverCount || 0} servers${n.apiReady ? " · API" : n.online ? " · " + t("nodes.noApi") : ""}</span>
+            ${n.apiUrl ? `<span class="plg-desc mono">${esc(n.apiUrl)}</span>` : ""}</span>
             <button class="btn btn-ghost btn-sm node-del" data-id="${esc(n.id)}">${ICONS.trash}</button></li>`).join("")}</ul>`
         : `<p class="hint">${t("nodes.empty")}</p>`;
       host.querySelectorAll(".node-del").forEach((btn) => {
@@ -4030,6 +4059,7 @@ async function renderAccountPage() {
   try {
     const info = await api("/api/me");
     meTotp = !!info.totp;
+    meRecoveryLeft = info.recoveryRemaining || 0;
   } catch {}
   const c = content();
   c.innerHTML = `<div class="page-head"><h1>${t("account.title")}</h1>
@@ -4091,19 +4121,55 @@ function renderDnsStatus(host, st) {
   host.textContent = text;
 }
 
+function showRecoveryCodes(codes) {
+  if (!codes || !codes.length) return;
+  const list = codes.map((c) => `<li><code>${esc(c)}</code></li>`).join("");
+  const dlg = el(`<div class="overlay" id="totp-recovery-modal">
+    <div class="modal">
+      <h2>${t("totp.recoveryTitle")}</h2>
+      <p class="hint">${t("totp.recoveryHint")}</p>
+      <ul class="totp-recovery-list">${list}</ul>
+      <div class="modal-actions">
+        <button class="btn btn-sm" id="totp-recovery-copy">${t("totp.recoveryCopy")}</button>
+        <button class="btn btn-ok btn-sm" id="totp-recovery-close">${t("totp.recoverySaved")}</button>
+      </div>
+    </div>
+  </div>`);
+  document.body.appendChild(dlg);
+  dlg.querySelector("#totp-recovery-copy").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(codes.join("\n"));
+      toast(t("totp.recoveryCopied"), "ok");
+    } catch { toast(codes.join("\n"), "ok"); }
+  });
+  dlg.querySelector("#totp-recovery-close").addEventListener("click", () => dlg.remove());
+}
+
 function renderTotpBody(host) {
   if (meTotp) {
+    const left = typeof meRecoveryLeft === "number" ? meRecoveryLeft : "?";
     host.innerHTML = `<p class="hint">${t("totp.on")}</p>
+      <p class="hint">${t("totp.recoveryLeft", { n: left })}</p>
       <div class="add-row">
-        <input type="text" id="totp-code" placeholder="${esc(t("totp.code"))}" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+        <input type="text" id="totp-code" placeholder="${esc(t("totp.code"))}" inputmode="text" maxlength="12" autocomplete="one-time-code">
+        <button class="btn btn-sm" id="totp-regen">${t("totp.recoveryRegen")}</button>
         <button class="btn btn-danger btn-sm" id="totp-off">${t("totp.disable")}</button>
       </div>`;
     host.querySelector("#totp-off").addEventListener("click", async () => {
       try {
         await api("/api/account/totp/disable", { method: "POST", body: { code: host.querySelector("#totp-code").value.trim() } });
         meTotp = false;
+        meRecoveryLeft = 0;
         renderTotpBody(host);
         toast(t("totp.off"), "ok");
+      } catch (e) { toastError(e); }
+    });
+    host.querySelector("#totp-regen").addEventListener("click", async () => {
+      try {
+        const res = await api("/api/account/totp/recovery", { method: "POST", body: { code: host.querySelector("#totp-code").value.trim() } });
+        meRecoveryLeft = (res.recoveryCodes || []).length;
+        showRecoveryCodes(res.recoveryCodes);
+        renderTotpBody(host);
       } catch (e) { toastError(e); }
     });
     return;
@@ -4118,6 +4184,7 @@ function renderTotpBody(host) {
     } catch (e) { toastError(e); return; }
     const setup = host.querySelector("#totp-setup");
     setup.innerHTML = `<p class="hint">${t("totp.setupHint")}</p>
+      ${init.qr ? `<img class="totp-qr" src="${esc(init.qr)}" alt="TOTP QR" width="220" height="220">` : ""}
       <p class="totp-secret"><code>${esc(init.secret)}</code></p>
       <p class="hint"><code class="wrap">${esc(init.url)}</code></p>
       <div class="add-row">
@@ -4126,8 +4193,10 @@ function renderTotpBody(host) {
       </div>`;
     setup.querySelector("#totp-confirm").addEventListener("click", async () => {
       try {
-        await api("/api/account/totp/enable", { method: "POST", body: { code: setup.querySelector("#totp-code2").value.trim() } });
+        const res = await api("/api/account/totp/enable", { method: "POST", body: { code: setup.querySelector("#totp-code2").value.trim() } });
         meTotp = true;
+        meRecoveryLeft = (res.recoveryCodes || []).length;
+        showRecoveryCodes(res.recoveryCodes);
         renderTotpBody(host);
         toast(t("totp.on"), "ok");
       } catch (e) { toastError(e); }

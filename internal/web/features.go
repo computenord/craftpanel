@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	qrcode "github.com/skip2/go-qrcode"
 
 	"github.com/computenord/craftpanel/internal/auth"
 	"github.com/computenord/craftpanel/internal/mc"
@@ -156,7 +159,16 @@ func (h *Handler) totpInit(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusInternalServerError, "internal", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"secret": secret, "url": url})
+	png, err := qrcode.Encode(url, qrcode.Medium, 220)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "internal", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"secret": secret,
+		"url":    url,
+		"qr":     "data:image/png;base64," + base64.StdEncoding.EncodeToString(png),
+	})
 }
 
 func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +179,8 @@ func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := h.username(r)
-	if err := h.Auth.EnableTOTP(user, req.Code); err != nil {
+	codes, err := h.Auth.EnableTOTP(user, req.Code)
+	if err != nil {
 		if errors.Is(err, auth.ErrInvalidTOTP) {
 			apiError(w, http.StatusBadRequest, "totp_invalid", "wrong code")
 			return
@@ -176,7 +189,7 @@ func (h *Handler) totpEnable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	log.Printf("totp enabled for %q", user)
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "recoveryCodes": codes})
 }
 
 func (h *Handler) totpDisable(w http.ResponseWriter, r *http.Request) {
@@ -197,6 +210,26 @@ func (h *Handler) totpDisable(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("totp disabled for %q", user)
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (h *Handler) totpRecovery(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	user := h.username(r)
+	codes, err := h.Auth.RegenerateRecoveryCodes(user, req.Code)
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidTOTP) {
+			apiError(w, http.StatusBadRequest, "totp_invalid", "wrong code")
+			return
+		}
+		apiError(w, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recoveryCodes": codes})
 }
 
 /* ---------- backups ---------- */

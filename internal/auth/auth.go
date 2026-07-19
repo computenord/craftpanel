@@ -51,7 +51,9 @@ type User struct {
 	Username   string    `json:"username"`
 	Hash       string    `json:"hash"`
 	TOTPSecret string    `json:"totpSecret,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
+	// RecoveryHashes are SHA-256 hex digests of one-time recovery codes.
+	RecoveryHashes []string  `json:"recoveryHashes,omitempty"`
+	CreatedAt      time.Time `json:"createdAt"`
 	// Role is "admin" or "user". Empty means admin (back-compat for the
 	// first account created before roles existed).
 	Role string `json:"role,omitempty"`
@@ -402,11 +404,32 @@ func (s *Store) Authenticate(ip, username, password, code string) error {
 		if strings.TrimSpace(code) == "" {
 			return ErrTOTPRequired
 		}
-		step, valid := validateTOTP(secret, code, time.Now(), s.lastTOTP[username])
-		if !valid {
-			return ErrInvalidTOTP
+		s.reloadUsersLocked()
+		var u *User
+		for i := range s.users {
+			if s.users[i].Username == username {
+				u = &s.users[i]
+				break
+			}
 		}
-		s.lastTOTP[username] = step
+		if u == nil {
+			return ErrInvalidCredentials
+		}
+		if looksLikeRecoveryCode(code) {
+			if !s.consumeRecoveryHashLocked(u, code) {
+				return ErrInvalidTOTP
+			}
+			if err := fsutil.WriteJSONAtomic(s.usersPath, s.users); err != nil {
+				return err
+			}
+			s.stampUsersLocked()
+		} else {
+			step, valid := validateTOTP(secret, code, time.Now(), s.lastTOTP[username])
+			if !valid {
+				return ErrInvalidTOTP
+			}
+			s.lastTOTP[username] = step
+		}
 	}
 	delete(s.fails, ip)
 	return nil

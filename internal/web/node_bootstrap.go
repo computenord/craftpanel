@@ -124,11 +124,30 @@ mkdir -p "$DATA_DIR/bin"
 install -m 755 -o "$SERVICE_USER" -g "$SERVICE_USER" "$TMP" "$BIN"
 ln -sfn "$BIN" "$BIN_LINK"
 
+# Advertised URL the panel uses to reach this node's control API.
+# Override with CRAFTPANEL_NODE_URL=https://node.example.com:8421 when behind NAT.
+NODE_API_PORT="${CRAFTPANEL_NODE_API_PORT:-8421}"
+NODE_LISTEN=":${NODE_API_PORT}"
+if [ -n "${CRAFTPANEL_NODE_URL:-}" ]; then
+  NODE_API_URL="$CRAFTPANEL_NODE_URL"
+else
+  NODE_IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}' || true)
+  if [ -z "$NODE_IP" ]; then
+    NODE_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || true)
+  fi
+  if [ -z "$NODE_IP" ]; then
+    NODE_IP=127.0.0.1
+  fi
+  NODE_API_URL="http://${NODE_IP}:${NODE_API_PORT}"
+fi
+
 umask 077
 cat > "$DATA_DIR/node-agent.json" <<EOF
 {
   "panelUrl": "$PANEL_URL",
-  "token": "$NODE_TOKEN"
+  "token": "$NODE_TOKEN",
+  "listen": "$NODE_LISTEN",
+  "apiUrl": "$NODE_API_URL"
 }
 EOF
 chown -R "$SERVICE_USER:$SERVICE_USER" "$DATA_DIR"
@@ -173,8 +192,11 @@ fi
 
 say ""
 say "Done. This host is now a Craftpanel node."
+say "  Control API: $NODE_API_URL (panel must reach this)"
 say "  systemctl status craftpanel-node"
 say "  journalctl -u craftpanel-node -f"
+say "If the panel cannot reach the node, set CRAFTPANEL_NODE_URL and re-run bootstrap,"
+say "or edit $DATA_DIR/node-agent.json (apiUrl) and restart craftpanel-node."
 `
 	out := strings.ReplaceAll(tmpl, "__PANEL_URL__", shellSingleQuote(panelURL))
 	out = strings.ReplaceAll(out, "__NODE_TOKEN__", shellSingleQuote(token))

@@ -226,12 +226,14 @@ func runNodeAgent(dataDir, panelURL, token string) error {
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return err
 	}
+	var cfg node.AgentConfig
 	// Prefer flags; otherwise load node-agent.json written by the bootstrap script.
 	if panelURL == "" || token == "" {
-		cfg, err := node.LoadAgentConfig(dataDir)
+		loaded, err := node.LoadAgentConfig(dataDir)
 		if err != nil {
 			return errors.New("usage: craftpanel node -panel https://panel.example.com -node-token node_… -data /path\n(or place node-agent.json in the data directory via the panel bootstrap command)")
 		}
+		cfg = loaded
 		if panelURL == "" {
 			panelURL = cfg.PanelURL
 		}
@@ -239,8 +241,16 @@ func runNodeAgent(dataDir, panelURL, token string) error {
 			token = cfg.Token
 		}
 	} else {
-		_ = node.WriteAgentConfig(dataDir, node.AgentConfig{PanelURL: panelURL, Token: token})
+		cfg = node.AgentConfig{PanelURL: panelURL, Token: token, Listen: ":8421"}
+		_ = node.WriteAgentConfig(dataDir, cfg)
 	}
+	if cfg.Listen == "" {
+		cfg.Listen = ":8421"
+	}
+	cfg.PanelURL = panelURL
+	cfg.Token = token
+	apiURL := node.ResolveApiURL(cfg)
+
 	versions := mc.NewVersions()
 	manager, err := mc.NewManager(dataDir, versions)
 	if err != nil {
@@ -249,9 +259,23 @@ func runNodeAgent(dataDir, panelURL, token string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go manager.StartAutostarts()
-	ag := &node.Agent{PanelURL: panelURL, Token: token, Version: version, Manager: manager}
+
+	localAPI := web.NodeLocalAPI(manager, versions, token, version)
+	apiSrv := &http.Server{Addr: cfg.Listen, Handler: localAPI}
+	go func() {
+		log.Printf("node control API on %s (advertised %s)", cfg.Listen, apiURL)
+		if err := apiSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("node control API: %v", err)
+		}
+	}()
+
+	ag := &node.Agent{PanelURL: panelURL, Token: token, ApiURL: apiURL, Version: version, Manager: manager}
 	log.Printf("node agent: reporting to %s (data: %s)", panelURL, dataDir)
 	ag.Run(ctx)
+
+	shutdownCtx, cancelAPI := context.WithTimeout(context.Background(), 5*time.Second)
+	_ = apiSrv.Shutdown(shutdownCtx)
+	cancelAPI()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 	manager.StopAll(stopCtx)

@@ -16,6 +16,7 @@ import (
 type Agent struct {
 	PanelURL string
 	Token    string
+	ApiURL   string
 	Version  string
 	Manager  *mc.Manager
 	Client   *http.Client
@@ -46,7 +47,7 @@ func (a *Agent) syncOnce(ctx context.Context) {
 			Port: v.Port, Status: v.Status, MemoryMB: v.MemoryMB,
 		})
 	}
-	body, _ := json.Marshal(SyncRequest{Version: a.Version, Servers: servers})
+	body, _ := json.Marshal(SyncRequest{Version: a.Version, ApiURL: a.ApiURL, Servers: servers})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, stringsTrimRight(a.PanelURL)+"/api/nodes/sync", bytes.NewReader(body))
 	if err != nil {
 		return
@@ -68,8 +69,6 @@ func (a *Agent) syncOnce(ctx context.Context) {
 		return
 	}
 	for _, cmd := range out.Commands {
-		msg := ""
-		ok := true
 		var err error
 		switch cmd.Op {
 		case "start":
@@ -84,14 +83,10 @@ func (a *Agent) syncOnce(ctx context.Context) {
 			err = fmt.Errorf("unknown op %q", cmd.Op)
 		}
 		if err != nil {
-			ok = false
-			msg = err.Error()
 			log.Printf("node command %s %s: %v", cmd.Op, cmd.ServerID, err)
 		} else {
 			log.Printf("node command %s %s: ok", cmd.Op, cmd.ServerID)
 		}
-		_ = ok
-		_ = msg
 	}
 }
 

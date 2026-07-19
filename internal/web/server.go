@@ -123,6 +123,7 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("POST /api/account/totp/init", h.totpInit)
 	mux.HandleFunc("POST /api/account/totp/enable", h.totpEnable)
 	mux.HandleFunc("POST /api/account/totp/disable", h.totpDisable)
+	mux.HandleFunc("POST /api/account/totp/recovery", h.totpRecovery)
 
 	mux.HandleFunc("GET /api/servers/{id}/backups", h.backupList)
 	mux.HandleFunc("POST /api/servers/{id}/backups", h.backupCreate)
@@ -206,7 +207,7 @@ func New(authStore *auth.Store, manager *mc.Manager, versions *mc.Versions, vers
 	mux.HandleFunc("GET /api/nodes/bootstrap", h.nodeBootstrap)
 	mux.HandleFunc("GET /api/nodes/binary", h.nodeBinary)
 
-	return h.securityHeaders(h.csrfGuard(h.authGate(h.lockGuard(mux))))
+	return h.securityHeaders(h.csrfGuard(h.authGate(h.lockGuard(h.remoteProxy(mux)))))
 }
 
 // lockGuard blocks state-changing API calls while the instance is locked or

@@ -100,31 +100,37 @@ func (s *Store) InitTOTP(username string) (secret, otpauth string, err error) {
 	return secret, totpURL(username, secret), nil
 }
 
-func (s *Store) EnableTOTP(username, code string) error {
+// EnableTOTP confirms the pending secret and returns one-time recovery codes.
+func (s *Store) EnableTOTP(username, code string) (recovery []string, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	secret, ok := s.pendingTOTP[username]
 	if !ok {
-		return errors.New("no pending two-factor setup, start again")
+		return nil, errors.New("no pending two-factor setup, start again")
 	}
 	step, valid := validateTOTP(secret, code, time.Now(), 0)
 	if !valid {
-		return ErrInvalidTOTP
+		return nil, ErrInvalidTOTP
+	}
+	plain, hashes, err := GenerateRecoveryCodes()
+	if err != nil {
+		return nil, err
 	}
 	s.reloadUsersLocked()
 	for i := range s.users {
 		if s.users[i].Username == username {
 			s.users[i].TOTPSecret = secret
+			s.users[i].RecoveryHashes = hashes
 			if err := fsutil.WriteJSONAtomic(s.usersPath, s.users); err != nil {
-				return err
+				return nil, err
 			}
 			s.stampUsersLocked()
 			s.lastTOTP[username] = step
 			delete(s.pendingTOTP, username)
-			return nil
+			return plain, nil
 		}
 	}
-	return ErrUserNotFound
+	return nil, ErrUserNotFound
 }
 
 func (s *Store) DisableTOTP(username, code string) error {
@@ -136,10 +142,17 @@ func (s *Store) DisableTOTP(username, code string) error {
 			if s.users[i].TOTPSecret == "" {
 				return errors.New("two-factor auth is not enabled")
 			}
-			if _, valid := validateTOTP(s.users[i].TOTPSecret, code, time.Now(), s.lastTOTP[username]); !valid {
+			ok := false
+			if looksLikeRecoveryCode(code) {
+				ok = s.consumeRecoveryHashLocked(&s.users[i], code)
+			} else {
+				_, ok = validateTOTP(s.users[i].TOTPSecret, code, time.Now(), s.lastTOTP[username])
+			}
+			if !ok {
 				return ErrInvalidTOTP
 			}
 			s.users[i].TOTPSecret = ""
+			s.users[i].RecoveryHashes = nil
 			if err := fsutil.WriteJSONAtomic(s.usersPath, s.users); err != nil {
 				return err
 			}

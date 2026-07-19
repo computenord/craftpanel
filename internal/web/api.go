@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"runtime"
@@ -101,11 +102,12 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"username": u.Username,
-		"role":     u.Role,
-		"access":   u.Access,
-		"admin":    u.IsAdmin(),
-		"totp":     h.Auth.TOTPEnabled(u.Username),
+		"username":          u.Username,
+		"role":              u.Role,
+		"access":            u.Access,
+		"admin":             u.IsAdmin(),
+		"totp":              h.Auth.TOTPEnabled(u.Username),
+		"recoveryRemaining": h.Auth.RecoveryCodesRemaining(u.Username),
 	})
 }
 
@@ -183,8 +185,26 @@ func (h *Handler) createServer(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdmin(w, r); !ok {
 		return
 	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "bad_request", "invalid body")
+		return
+	}
+	var meta struct {
+		NodeID string `json:"nodeId"`
+	}
+	_ = json.Unmarshal(body, &meta)
+	if meta.NodeID != "" {
+		if h.Nodes == nil {
+			apiError(w, http.StatusBadRequest, "bad_request", "nodes not available")
+			return
+		}
+		h.proxyCreateToNode(w, r, meta.NodeID, body)
+		return
+	}
 	var req mc.CreateRequest
-	if !decodeJSON(w, r, &req) {
+	if err := json.Unmarshal(body, &req); err != nil {
+		apiError(w, http.StatusBadRequest, "bad_request", "invalid JSON")
 		return
 	}
 	view, err := h.Manager.Create(req)

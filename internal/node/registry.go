@@ -18,14 +18,19 @@ import (
 
 // Node is a registered remote agent.
 type Node struct {
-	ID           string    `json:"id"`
-	Name         string    `json:"name"`
-	TokenHash    string    `json:"tokenHash"`
-	CreatedAt    time.Time `json:"createdAt"`
-	LastSeen     time.Time `json:"lastSeen,omitempty"`
-	Version      string    `json:"version,omitempty"`
-	Online       bool      `json:"online"`
-	ServerCount  int       `json:"serverCount"`
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	TokenHash string    `json:"tokenHash"`
+	// Token is the raw enroll token, kept so the panel can call the node's
+	// local control API. Treat nodes.json as secret.
+	Token       string    `json:"token,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	LastSeen    time.Time `json:"lastSeen,omitempty"`
+	Version     string    `json:"version,omitempty"`
+	Online      bool      `json:"online"`
+	ServerCount int       `json:"serverCount"`
+	// ApiURL is the last advertised control URL from the agent.
+	ApiURL string `json:"apiUrl,omitempty"`
 }
 
 // NodeView is the safe API representation (no token hash).
@@ -37,6 +42,8 @@ type NodeView struct {
 	Version     string    `json:"version,omitempty"`
 	Online      bool      `json:"online"`
 	ServerCount int       `json:"serverCount"`
+	ApiURL      string    `json:"apiUrl,omitempty"`
+	ApiReady    bool      `json:"apiReady"`
 	// Token is only set on enroll, once.
 	Token string `json:"token,omitempty"`
 }
@@ -61,8 +68,9 @@ type Command struct {
 
 // SyncRequest is posted by the agent.
 type SyncRequest struct {
-	Version string         `json:"version"`
-	Servers []RemoteServer `json:"servers"`
+	Version string          `json:"version"`
+	ApiURL  string          `json:"apiUrl,omitempty"`
+	Servers []RemoteServer  `json:"servers"`
 	Results []CommandResult `json:"results,omitempty"`
 }
 
@@ -126,6 +134,7 @@ func (r *Registry) Enroll(name string) (NodeView, error) {
 		ID:        hex.EncodeToString(idRaw),
 		Name:      name,
 		TokenHash: hex.EncodeToString(sum[:]),
+		Token:     token,
 		CreatedAt: time.Now().UTC(),
 	}
 	r.mu.Lock()
@@ -148,6 +157,7 @@ func (r *Registry) List() []NodeView {
 		out = append(out, NodeView{
 			ID: n.ID, Name: n.Name, CreatedAt: n.CreatedAt, LastSeen: n.LastSeen,
 			Version: n.Version, Online: online, ServerCount: len(r.servers[n.ID]),
+			ApiURL: n.ApiURL, ApiReady: online && n.ApiURL != "" && n.Token != "",
 		})
 	}
 	return out
@@ -195,6 +205,9 @@ func (r *Registry) Sync(nodeID string, req SyncRequest) SyncResponse {
 		r.nodes[i].LastSeen = time.Now().UTC()
 		r.nodes[i].Version = req.Version
 		r.nodes[i].ServerCount = len(req.Servers)
+		if u := strings.TrimRight(strings.TrimSpace(req.ApiURL), "/"); u != "" {
+			r.nodes[i].ApiURL = u
+		}
 		_ = r.saveLocked()
 		break
 	}
@@ -205,6 +218,21 @@ func (r *Registry) Sync(nodeID string, req SyncRequest) SyncResponse {
 		cmds = []Command{}
 	}
 	return SyncResponse{Commands: cmds}
+}
+
+// Lookup returns a node by id (includes ApiURL / Token for proxying).
+func (r *Registry) Lookup(id string) (Node, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	for _, n := range r.nodes {
+		if n.ID != id {
+			continue
+		}
+		n.Online = !n.LastSeen.IsZero() && now.Sub(n.LastSeen) < r.onlineFor
+		return n, true
+	}
+	return Node{}, false
 }
 
 func (r *Registry) Enqueue(nodeID, op, serverID string) (Command, error) {
@@ -236,29 +264,21 @@ func (r *Registry) AllServers() []map[string]any {
 		online := !n.LastSeen.IsZero() && now.Sub(n.LastSeen) < r.onlineFor
 		for _, s := range r.servers[n.ID] {
 			out = append(out, map[string]any{
-				"id":       n.ID + "/" + s.ID,
-				"name":     s.Name,
-				"type":     s.Type,
-				"version":  s.Version,
-				"port":     s.Port,
-				"status":   s.Status,
-				"memoryMB": s.MemoryMB,
-				"nodeId":   n.ID,
-				"nodeName": n.Name,
+				"id":         CompositeID(n.ID, s.ID),
+				"name":       s.Name,
+				"type":       s.Type,
+				"version":    s.Version,
+				"port":       s.Port,
+				"status":     s.Status,
+				"memoryMB":   s.MemoryMB,
+				"nodeId":     n.ID,
+				"nodeName":   n.Name,
 				"nodeOnline": online,
+				"apiReady":   online && n.ApiURL != "" && n.Token != "",
 			})
 		}
 	}
 	return out
-}
-
-// ParseCompositeID splits "nodeId/serverId".
-func ParseCompositeID(id string) (nodeID, serverID string, ok bool) {
-	i := strings.IndexByte(id, '/')
-	if i <= 0 || i == len(id)-1 {
-		return "", "", false
-	}
-	return id[:i], id[i+1:], true
 }
 
 // DebugJSON helper for tests.
